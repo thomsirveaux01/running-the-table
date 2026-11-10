@@ -118,7 +118,10 @@ struct WYSIWYGView: View {
                 }
             }
         }
-        .frame(width: gridColumnsWidth, height: gridHeight)
+        // topLeading: the ZStack's intrinsic size is only the largest cell
+        // (offsets don't count in layout), so the default centering would
+        // slide every cell right/down by half the leftover frame.
+        .frame(width: gridColumnsWidth, height: gridHeight, alignment: .topLeading)
     }
 
     /// Height of a cell that towers over `rowSpan` rows, dividers included.
