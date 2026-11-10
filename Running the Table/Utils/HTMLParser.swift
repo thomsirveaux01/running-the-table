@@ -217,6 +217,7 @@ enum HTMLParser {
 
         var i = open + 1
         var section: RowSection = .body
+        var sawHead = false
         var droppedTextNoted = false
         var closedTable = false
 
@@ -266,7 +267,7 @@ enum HTMLParser {
                                                        length: blockEnd - t.range.location))
                 p.columnMarkup.append(block.replacingOccurrences(of: "\\s+$", with: "", options: .regularExpression))
                 i = j
-            case (.open, "thead"): section = .head; i += 1
+            case (.open, "thead"): section = .head; sawHead = true; i += 1
             case (.open, "tbody"): section = .body; i += 1
             case (.open, "tfoot"): section = .foot; i += 1
             case (.close, "thead"), (.close, "tbody"), (.close, "tfoot"): section = .body; i += 1
@@ -288,6 +289,15 @@ enum HTMLParser {
         }
         if !closedTable {
             p.diagnostics.append("Table is missing its </table> tag.")
+        }
+        // Legacy tables flag headers with plain <th> rows: when the author
+        // never wrote a <thead>, treat leading all-header rows as the head.
+        if !sawHead {
+            for row in p.rows.indices {
+                guard !p.rows[row].cells.isEmpty,
+                      p.rows[row].cells.allSatisfy(\.isHeader) else { break }
+                p.rows[row].section = .head
+            }
         }
         if p.rows.isEmpty { p.rows = [TableRow(cells: [TableCell()])] }
         return p
@@ -335,7 +345,9 @@ enum HTMLParser {
         // Only EOF leaves a row genuinely unclosed; the next <tr> or a
         // section/table close are spec-valid implicit ends.
         if !ended { p.diagnostics.append("A table row is missing its </tr> tag.") }
-        if !cells.isEmpty { p.rows.append(TableRow(cells: cells, rawAttributes: rowRaw(t), section: section)) }
+        // Empty rows are kept: a rowspan can leave a row with no cells of its
+        // own, and dropping it would shrink the table on reload.
+        p.rows.append(TableRow(cells: cells, rawAttributes: rowRaw(t), section: section))
         return j
     }
 

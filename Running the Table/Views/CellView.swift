@@ -8,6 +8,8 @@ struct CellView: View {
     /// Visual column span of this slot, for drag selection with colspan.
     let startCol: Int
     let span: Int
+    /// Visual row span, for drag selection with rowspan.
+    let rowSpan: Int
     let width: CGFloat
     let height: CGFloat
     let visualCellAt: (NSPoint) -> VisualCell?
@@ -44,6 +46,7 @@ struct CellView: View {
                 },
                 gridVisualOrigin: VisualCell(row: row, column: startCol),
                 gridVisualSpan: span,
+                gridVisualRowSpan: rowSpan,
                 visualCellAt: visualCellAt,
                 cellRangeHandler: { viewModel.cellSelection = $0 },
                 copyCells: { viewModel.copySelectedCells() },

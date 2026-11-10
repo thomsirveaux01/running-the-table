@@ -29,6 +29,7 @@ final class CellTextView: NSTextView {
     /// rectangle, the grid's point→cell hit-test, and the selection sink.
     var gridVisualOrigin: VisualCell?
     var gridVisualSpan = 1
+    var gridVisualRowSpan = 1
     var visualCellAt: ((NSPoint) -> VisualCell?)?
     var cellRangeHandler: ((VisualCellRange?) -> Void)?
     /// Overrides the watched pointer position (window-base) during a gesture;
@@ -100,7 +101,8 @@ final class CellTextView: NSTextView {
         if inside && !isDraggingCells { return }
         isDraggingCells = true
         cellRangeHandler?(VisualCellRange(
-            rowStart: min(origin.row, hit.row), rowEnd: max(origin.row, hit.row),
+            rowStart: min(origin.row, hit.row),
+            rowEnd: max(origin.row + gridVisualRowSpan - 1, hit.row),
             colStart: min(origin.column, hit.column),
             colEnd: max(origin.column + gridVisualSpan - 1, hit.column)))
     }
@@ -270,6 +272,7 @@ struct NSTextViewRepresentable: NSViewRepresentable {
     /// rectangle, and the grid's point→cell hit-test and selection sink.
     var gridVisualOrigin: VisualCell?
     var gridVisualSpan = 1
+    var gridVisualRowSpan = 1
     var visualCellAt: ((NSPoint) -> VisualCell?)?
     var cellRangeHandler: ((VisualCellRange?) -> Void)?
     /// With a cell range selected, ⌘C copies the cells; true = handled.
@@ -411,6 +414,7 @@ struct NSTextViewRepresentable: NSViewRepresentable {
         }
         textView.gridVisualOrigin = gridVisualOrigin
         textView.gridVisualSpan = gridVisualSpan
+        textView.gridVisualRowSpan = gridVisualRowSpan
         textView.visualCellAt = visualCellAt
         textView.cellRangeHandler = cellRangeHandler
         textView.copyCellsHandler = copyCells

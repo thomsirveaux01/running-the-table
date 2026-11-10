@@ -21,9 +21,11 @@ struct VisualCellRange: Equatable {
     var colStart: Int
     var colEnd: Int
 
-    /// True when a slot, which may span several columns, intersects the range.
-    func intersects(row: Int, startCol: Int, span: Int) -> Bool {
-        row >= rowStart && row <= rowEnd && startCol <= colEnd && startCol + span - 1 >= colStart
+    /// True when a slot, which may span several columns and rows, intersects
+    /// the range.
+    func intersects(row: Int, rowSpan: Int = 1, startCol: Int, span: Int) -> Bool {
+        row <= rowEnd && row + rowSpan - 1 >= rowStart
+            && startCol <= colEnd && startCol + span - 1 >= colStart
     }
 }
 
@@ -431,6 +433,15 @@ final class TableViewModel: ObservableObject {
         let index = cell.row + (after ? 1 : 0)
         performUndoable(after ? "Add Row" : "Add Row Above") {
             let cols = max(self.table.columnCount, 1)
+            // Merges straddling the new boundary grow to cover the inserted
+            // row; normalize then pads or trims the new row against the
+            // resulting occupancy.
+            for (origin, slots) in self.table.placements().enumerated() where origin < index {
+                for p in slots where p.rowSpan > 1 && origin + p.rowSpan - 1 >= index {
+                    self.table.rows[origin][p.cellIndex].rowspan =
+                        min(p.rowSpan + 1, TableCell.maxRowspan)
+                }
+            }
             self.table.rows.insert(TableRow(cells: Array(repeating: TableCell(), count: cols)), at: index)
             self.table.normalize()
             self.ensureSizing()
@@ -446,22 +457,54 @@ final class TableViewModel: ObservableObject {
     }
 
     func addColumn(adjacentTo cell: GridCell, after: Bool) {
-        guard cell.row < table.rows.count, cell.column < table.rows[cell.row].count else { return }
+        guard let p = placement(of: cell) else { return }
+        let boundary = p.startCol + (after ? p.colSpan : 0)
         performUndoable(after ? "Add Column" : "Add Column Left") {
+            let slots = self.table.placements()
+            // Merges the new column lands inside, by their origin rows.
+            let straddlers = slots.enumerated().flatMap { row, rowSlots in
+                rowSlots.filter { $0.startCol < boundary && boundary < $0.startCol + $0.colSpan }
+                    .map { (row: row, placement: $0) }
+            }
             for row in self.table.rows.indices {
-                let insertAt = min(cell.column + (after ? 1 : 0), self.table.rows[row].count)
+                if let straddler = straddlers.first(where: {
+                    row >= $0.row && row < $0.row + $0.placement.rowSpan
+                }) {
+                    // The new column belongs to the merge: the origin cell
+                    // widens, and rows the merge covers get no cell of their
+                    // own for it.
+                    if row == straddler.row {
+                        self.table.rows[row][straddler.placement.cellIndex].colspan =
+                            min(straddler.placement.colSpan + 1, TableCell.maxColspan)
+                    }
+                    continue
+                }
+                // Array order matches visual order, so inserting before the
+                // first own cell at or past the boundary (or appending) puts
+                // the new cell in the new column even in rowspan-covered rows.
+                let insertAt = slots[row].first { $0.startCol >= boundary }?.cellIndex
+                    ?? self.table.rows[row].count
                 self.table.rows[row].insert(TableCell(), at: insertAt)
             }
             self.table.normalize()
             self.ensureSizing()
-            self.focusedCell = GridCell(row: cell.row, column: cell.column + (after ? 1 : 0))
+            let col = min(boundary, max(self.table.rows[cell.row].count - 1, 0))
+            self.focusedCell = GridCell(row: cell.row, column: col)
             self.flushToDocument()
             self.regenerateHTML()
         }
     }
 
+    /// The visual footprint of an array-indexed cell.
+    private func placement(of cell: GridCell) -> Table.CellPlacement? {
+        guard table.rows.indices.contains(cell.row),
+              table.rows[cell.row].cells.indices.contains(cell.column) else { return nil }
+        return table.placements()[cell.row].first { $0.cellIndex == cell.column }
+    }
+
     func removeRow() {
-        guard let f = focusedCell, table.rows.count > 1, f.row < table.rows.count else { return }
+        guard let f = focusedCell, table.rows.count > 1, f.row < table.rows.count,
+              canRemoveRow(f.row) else { return }
         performUndoable("Remove Row") {
             self.table.rows.remove(at: f.row)
             self.table.normalize()
@@ -472,13 +515,23 @@ final class TableViewModel: ObservableObject {
         }
     }
 
+    /// Deleting a row a merge touches would tear the merge; those rows stay
+    /// undeletable until the merge is split.
+    func canRemoveRow(_ row: Int) -> Bool {
+        table.rows.indices.contains(row) && !table.rowspanCrosses(rows: row, row)
+    }
+
     func removeColumn() {
-        guard let f = focusedCell, table.columnCount > 1,
-              f.row < table.rows.count, f.column < table.rows[f.row].count else { return }
+        guard let f = focusedCell, table.columnCount > 1, let p = placement(of: f),
+              !table.columnHasMerge(p.startCol) else { return }
+        let col = p.startCol
         performUndoable("Remove Column") {
-            for row in self.table.rows.indices where f.column < self.table.rows[row].count {
-                self.table.rows[row].remove(at: f.column)
+            for row in self.table.rows.indices {
+                if let idx = self.cellIndex(containingColumn: col, in: self.table.rows[row]) {
+                    self.table.rows[row].remove(at: idx)
+                }
             }
+            if self.columnWidths.indices.contains(col) { self.columnWidths.remove(at: col) }
             self.table.normalize()
             self.ensureSizing()
             self.keepFocusValid()
@@ -487,12 +540,27 @@ final class TableViewModel: ObservableObject {
         }
     }
 
+    /// A merge touching the column means wholesale removal would misalign the
+    /// cells around it; those columns stay un-deletable until split.
+    var canRemoveFocusedColumn: Bool {
+        guard let f = focusedCell, table.columnCount > 1, let p = placement(of: f) else { return false }
+        return !table.columnHasMerge(p.startCol)
+    }
+
+    /// Rows a merge touches can't travel alone (the covered rows or the
+    /// merge's lower half would be left behind), so their handles sit idle.
+    func canMoveRow(_ row: Int) -> Bool {
+        table.rows.indices.contains(row) && !table.rowspanCrosses(rows: row, row)
+    }
+
     // Height and focus travel with the row; the drag-start snapshot is the
     // single undo step.
     func moveRow(from source: Int, to destination: Int, before: EditorSnapshot) {
         let count = table.rows.count
         let dest = min(max(destination, 0), count - 1)
-        guard table.rows.indices.contains(source), dest != source else { return }
+        guard table.rows.indices.contains(source), dest != source,
+              !table.rowspanCrosses(rows: source, source),
+              !table.rowspanSplitsBand(min(source, dest), max(source, dest)) else { return }
         let toOffset = dest > source ? dest + 1 : dest
         table.rows.move(fromOffsets: IndexSet(integer: source), toOffset: toOffset)
         if rowHeights.indices.contains(source) {
@@ -521,15 +589,11 @@ final class TableViewModel: ObservableObject {
         return nil
     }
 
-    // A colspan cell covering the column wouldn't travel with it, so those
-    // columns stay un-grabbable.
+    // A colspan cell wouldn't travel with the column, and a rowspan cell
+    // spans several rows of alignment, so merge-touched columns stay
+    // un-grabbable.
     func canMoveColumn(_ col: Int) -> Bool {
-        for row in table.rows {
-            guard let idx = cellIndex(containingColumn: col, in: row) else { continue }
-            let span = min(max(row[idx].colspan, TableCell.minColspan), TableCell.maxColspan)
-            if span > 1 { return false }
-        }
-        return true
+        !table.columnHasMerge(col)
     }
 
     // Width and focus travel with the column; cells are matched by grid
@@ -537,7 +601,8 @@ final class TableViewModel: ObservableObject {
     func moveColumn(from source: Int, to destination: Int, before: EditorSnapshot) {
         let count = table.columnCount
         let dest = min(max(destination, 0), count - 1)
-        guard source >= 0, source < count, dest != source else { return }
+        guard source >= 0, source < count, dest != source,
+              !table.colspanSplitsBand(min(source, dest), max(source, dest)) else { return }
         let toOffset = dest > source ? dest + 1 : dest
         if columnWidths.indices.contains(source) {
             columnWidths.move(fromOffsets: IndexSet(integer: source), toOffset: toOffset)
@@ -602,6 +667,195 @@ final class TableViewModel: ObservableObject {
             },
             set: { self.setColspan($0) }
         )
+    }
+
+    // MARK: - Merging
+
+    /// The selection rectangle, validated for merging: bigger than one cell,
+    /// within the span limits, inside one row section, and no existing merge
+    /// crosses its border (those would be cut in half).
+    private var mergeRect: VisualCellRange? {
+        guard let sel = cellSelection,
+              table.rows.indices.contains(sel.rowStart),
+              table.rows.indices.contains(sel.rowEnd),
+              sel.colStart >= 0, sel.colEnd < table.columnCount,
+              sel.rowEnd - sel.rowStart + 1 <= TableCell.maxRowspan,
+              sel.colEnd - sel.colStart + 1 <= TableCell.maxColspan,
+              Set(table.rows[sel.rowStart...sel.rowEnd].map(\.section)).count == 1
+        else { return nil }
+        for (row, slots) in table.placements().enumerated() {
+            for p in slots where sel.intersects(row: row, rowSpan: p.rowSpan,
+                                                startCol: p.startCol, span: p.colSpan) {
+                let inside = row >= sel.rowStart && row + p.rowSpan - 1 <= sel.rowEnd
+                    && p.startCol >= sel.colStart && p.startCol + p.colSpan - 1 <= sel.colEnd
+                if !inside { return nil }
+            }
+        }
+        return sel
+    }
+
+    var canMergeSelection: Bool { mergeRect != nil }
+
+    /// Collapse the selection to its top-left cell, which keeps its content;
+    /// every other cell inside the rectangle is removed.
+    func mergeSelection() {
+        guard let sel = mergeRect else { return }
+        performUndoable("Merge Cells") {
+            guard let top = self.table.cellCovering(row: sel.rowStart, col: sel.colStart) else { return }
+            for row in sel.rowStart...sel.rowEnd {
+                let doomed = self.table.placements()[row]
+                    .filter { $0.startCol >= sel.colStart && $0.startCol + $0.colSpan - 1 <= sel.colEnd }
+                    .map(\.cellIndex)
+                    .filter { !(row == top.row && $0 == top.cell) }
+                    .sorted(by: >)
+                for index in doomed { self.table.rows[row].remove(at: index) }
+            }
+            var survivor = self.table.rows[top.row][top.cell]
+            survivor.colspan = sel.colEnd - sel.colStart + 1
+            survivor.rowspan = sel.rowEnd - sel.rowStart + 1
+            // The merged interior is the model's own from here on.
+            survivor.rawInnerHTML = nil
+            survivor.selectionRange = NSRange(location: 0, length: survivor.content.length)
+            self.table.rows[top.row][top.cell] = survivor
+            self.table.normalize()
+            self.ensureSizing()
+            self.cellSelection = nil
+            self.focusedCell = GridCell(row: top.row, column: top.cell)
+            self.flushToDocument()
+            self.regenerateHTML()
+        }
+    }
+
+    var canSplitFocused: Bool {
+        guard let f = focusedCell, let p = placement(of: f) else { return false }
+        return p.colSpan > 1 || p.rowSpan > 1
+    }
+
+    /// Undo one merge: the cell goes back to 1×1 and empty cells take back
+    /// the columns it freed, in its row and in every row it covered.
+    func splitFocusedCell() {
+        guard let f = focusedCell, let p = placement(of: f), p.colSpan > 1 || p.rowSpan > 1 else { return }
+        performUndoable("Split Cells") {
+            // Where each covered row reclaims the freed columns, as array
+            // indices computed before anything moves.
+            let slots = self.table.placements()
+            var insertions: [(row: Int, at: Int)] = []
+            for row in (f.row + 1)..<(f.row + p.rowSpan) where row < self.table.rows.count {
+                let at = slots[row].first { $0.startCol >= p.startCol }?.cellIndex
+                    ?? self.table.rows[row].count
+                insertions.append((row, at))
+            }
+            var cell = self.table.rows[f.row][f.column]
+            cell.colspan = 1
+            cell.rowspan = 1
+            cell.rawInnerHTML = nil
+            self.table.rows[f.row][f.column] = cell
+            for offset in 1..<p.colSpan {
+                self.table.rows[f.row].insert(TableCell(), at: f.column + offset)
+            }
+            for (row, at) in insertions {
+                for offset in 0..<p.colSpan {
+                    self.table.rows[row].insert(TableCell(), at: at + offset)
+                }
+            }
+            self.table.normalize()
+            self.ensureSizing()
+            self.flushToDocument()
+            self.regenerateHTML()
+        }
+    }
+
+    // MARK: - Caption
+
+    static let captionKey = GridCell(row: -2, column: -2)
+
+    var hasCaption: Bool { table.caption != nil }
+
+    var captionBinding: Binding<String> {
+        Binding(
+            get: { self.table.caption?.string ?? "" },
+            set: { self.updateCaption($0) }
+        )
+    }
+
+    func updateCaption(_ text: String) {
+        guard let existing = table.caption else { return }
+        let attributed = HTMLParser.plainAttributed(text)
+        guard !existing.isEqual(to: attributed) else { return }
+        let before = currentSnapshot()
+        table.caption = attributed
+        table.captionRaw = nil
+        flushToDocument()
+        regenerateHTML()
+        appendTypingChange(key: Self.captionKey, name: "Edit Caption", before: before)
+    }
+
+    func toggleCaption() {
+        performUndoable(table.caption == nil ? "Show Caption" : "Hide Caption") {
+            self.table.caption = self.table.caption == nil ? HTMLParser.plainAttributed("") : nil
+            self.table.captionRaw = nil
+            self.flushToDocument()
+            self.regenerateHTML()
+        }
+    }
+
+    // MARK: - Row sections
+
+    var focusedRowSection: RowSection? {
+        guard let f = focusedCell, table.rows.indices.contains(f.row) else { return nil }
+        return table.rows[f.row].section
+    }
+
+    func setFocusedRowSection(_ section: RowSection) {
+        guard let f = focusedCell, table.rows.indices.contains(f.row),
+              table.rows[f.row].section != section else { return }
+        performUndoable("Set Row Section") {
+            self.table.rows[f.row].section = section
+            self.flushToDocument()
+            self.regenerateHTML()
+        }
+    }
+
+    // MARK: - Table attributes
+
+    @Published var showTableAttributes = false
+    @Published var attributesDraft: [HTMLAttribute] = []
+
+    func beginTableAttributes() {
+        flushToDocument()
+        // The title has its own dialog; the sheet owns everything else.
+        attributesDraft = table.attributes.filter { $0.name != "data-table-name" }
+        showTableAttributes = true
+    }
+
+    func addAttributeRow() { attributesDraft.append(HTMLAttribute(name: "", value: "")) }
+
+    func removeAttributeRow(at index: Int) {
+        guard attributesDraft.indices.contains(index) else { return }
+        attributesDraft.remove(at: index)
+    }
+
+    func cancelTableAttributes() { showTableAttributes = false }
+
+    func commitTableAttributes() {
+        showTableAttributes = false
+        // Later duplicates edit the earlier one instead of doubling up.
+        var cleaned: [HTMLAttribute] = []
+        for attribute in attributesDraft {
+            let name = attribute.name.trimmingCharacters(in: .whitespaces).lowercased()
+            guard !name.isEmpty, name != "data-table-name" else { continue }
+            if let existing = cleaned.firstIndex(where: { $0.name == name }) {
+                cleaned[existing].value = attribute.value
+            } else {
+                cleaned.append(HTMLAttribute(name: name, value: attribute.value))
+            }
+        }
+        guard cleaned != table.attributes.filter({ $0.name != "data-table-name" }) else { return }
+        performUndoable("Edit Table Attributes") {
+            self.table.attributes = cleaned
+            self.flushToDocument()
+            self.regenerateHTML()
+        }
     }
 
     func toggleBold() {
@@ -1058,12 +1312,20 @@ final class TableViewModel: ObservableObject {
     func growRowIfNeeded(_ row: Int) {
         guard row >= 0, row < rowHeights.count, row < table.rows.count else { return }
         var needed = TableViewModel.defaultRowHeight
-        var position = 0
-        for cell in table.rows[row] {
-            let span = min(max(cell.colspan, TableCell.minColspan), TableCell.maxColspan)
-            let width = cellWidth(startingAtCol: position, span: span)
-            needed = max(needed, Self.requiredHeight(for: cell.content, width: width))
-            position += span
+        for p in table.placements()[row] {
+            let width = cellWidth(startingAtCol: p.startCol, span: p.colSpan)
+            let height = Self.requiredHeight(for: table.rows[row][p.cellIndex].content, width: width)
+            if p.rowSpan == 1 {
+                needed = max(needed, height)
+            } else {
+                // A tall cell gets every row it spans; a shortfall grows the
+                // origin row rather than clipping the text.
+                var available = CGFloat(p.rowSpan - 1) * WYSIWYGView.divider
+                for spanned in row..<min(row + p.rowSpan, rowHeights.count) {
+                    available += rowHeights[spanned]
+                }
+                if height > available { rowHeights[row] += height - available }
+            }
         }
         let target = max(rowHeights[row], needed)
         if target != rowHeights[row] { rowHeights[row] = target }
@@ -1091,7 +1353,8 @@ final class TableViewModel: ObservableObject {
     func cellWidth(startingAtCol col: Int, span: Int) -> CGFloat {
         let end = min(col + span, columnWidths.count)
         guard col < end else { return Self.defaultColumnWidth }
-        return columnWidths[col..<end].reduce(0, +)
+        // A spanning cell also covers the dividers between its columns.
+        return columnWidths[col..<end].reduce(0, +) + CGFloat(end - col - 1) * WYSIWYGView.divider
     }
 
     // Resize handles only sit where no row spans the boundary.
@@ -1213,38 +1476,21 @@ final class TableViewModel: ObservableObject {
 
     // MARK: - Cell copy / paste
 
-    /// A cell's array index plus the visual columns it occupies; mirrors the
-    /// grid's own slot layout so copy and selection agree on colspan.
-    private struct RowSlot {
-        let index: Int
-        let startCol: Int
-        let span: Int
-    }
-
-    private func rowSlots(for row: TableRow) -> [RowSlot] {
-        var slots: [RowSlot] = []
-        var position = 0
-        for (index, cell) in row.enumerated() {
-            let span = min(max(cell.colspan, TableCell.minColspan), TableCell.maxColspan)
-            slots.append(RowSlot(index: index, startCol: position, span: span))
-            position += span
-        }
-        return slots
-    }
-
-    /// The selected rectangle as its own Table: slot colspans clipped to the
-    /// column window, rows padded rectangular.
+    /// The selected rectangle as its own Table: slot spans clipped to the
+    /// selection window, rows padded rectangular.
     private func subtable(of sel: VisualCellRange) -> Table {
         var rows: [[TableCell]] = []
+        let placements = table.placements()
         for row in sel.rowStart...sel.rowEnd where table.rows.indices.contains(row) {
             var out: [TableCell] = []
-            for slot in rowSlots(for: table.rows[row])
-            where sel.intersects(row: row, startCol: slot.startCol, span: slot.span) {
-                let lo = max(slot.startCol, sel.colStart)
-                let hi = min(slot.startCol + slot.span - 1, sel.colEnd)
+            for p in placements[row]
+            where sel.intersects(row: row, rowSpan: p.rowSpan, startCol: p.startCol, span: p.colSpan) {
+                let lo = max(p.startCol, sel.colStart)
+                let hi = min(p.startCol + p.colSpan - 1, sel.colEnd)
                 guard lo <= hi else { continue }
-                var cell = table.rows[row][slot.index]
+                var cell = table.rows[row][p.cellIndex]
                 cell.colspan = hi - lo + 1
+                cell.rowspan = min(p.rowSpan, sel.rowEnd - row + 1)
                 out.append(cell)
             }
             if !out.isEmpty { rows.append(out) }

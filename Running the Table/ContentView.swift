@@ -51,6 +51,9 @@ struct ContentView: View {
         .sheet(isPresented: $viewModel.showRenamePrompt) {
             RenameTablePrompt(viewModel: viewModel)
         }
+        .sheet(isPresented: $viewModel.showTableAttributes) {
+            TableAttributesSheet(viewModel: viewModel)
+        }
         .frame(minWidth: 900, minHeight: 600)
     }
 

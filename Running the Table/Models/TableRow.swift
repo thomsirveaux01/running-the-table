@@ -3,6 +3,15 @@ import Foundation
 /// Where a row lives in HTML's row-section anatomy; export groups rows by it.
 enum RowSection: String {
     case head, body, foot
+
+    /// Label for the Row Section menu's radio items.
+    var menuTitle: String {
+        switch self {
+        case .head: return "Header"
+        case .body: return "Body"
+        case .foot: return "Footer"
+        }
+    }
 }
 
 /// One name/value pair as authored. Table-level only (the attributes sheet

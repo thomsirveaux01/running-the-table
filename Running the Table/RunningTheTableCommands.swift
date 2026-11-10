@@ -102,11 +102,13 @@ struct RunningTheTableCommands: Commands {
 
             Button("Remove Row") { viewModel.removeRow() }
                 .keyboardShortcut("R", modifiers: [.command, .option, .shift])
-                .disabled(viewModel.focusedCell == nil || viewModel.table.rows.count <= 1)
+                .disabled(viewModel.focusedCell == nil || viewModel.table.rows.count <= 1
+                          || !(viewModel.focusedCell.map { viewModel.canRemoveRow($0.row) } ?? false))
 
             Button("Remove Column") { viewModel.removeColumn() }
                 .keyboardShortcut("C", modifiers: [.command, .option, .shift])
-                .disabled(viewModel.focusedCell == nil || viewModel.table.columnCount <= 1)
+                .disabled(viewModel.focusedCell == nil || viewModel.table.columnCount <= 1
+                          || !viewModel.canRemoveFocusedColumn)
 
             Divider()
 
@@ -149,6 +151,45 @@ struct RunningTheTableCommands: Commands {
                     .disabled(viewModel.focusedCell == nil)
                 }
             }
+
+            Divider()
+
+            Button("Merge Cells") { viewModel.mergeSelection() }
+                .keyboardShortcut("m", modifiers: [.command, .option])
+                .disabled(!viewModel.canMergeSelection)
+
+            Button("Split Cells") { viewModel.splitFocusedCell() }
+                .keyboardShortcut("M", modifiers: [.command, .option, .shift])
+                .disabled(!viewModel.canSplitFocused)
+
+            // Which HTML section the focused row lives in; the generator
+            // groups rows by it when it writes thead/tbody/tfoot.
+            Menu("Row Section") {
+                ForEach([RowSection.head, .body, .foot], id: \.self) { section in
+                    Button {
+                        viewModel.setFocusedRowSection(section)
+                    } label: {
+                        if viewModel.focusedRowSection == section {
+                            Label(section.menuTitle, systemImage: "checkmark")
+                        } else {
+                            Text(section.menuTitle)
+                        }
+                    }
+                    .disabled(viewModel.focusedCell == nil)
+                }
+            }
+        }
+
+        // Table-wide constructs that don't belong to one cell.
+        CommandMenu("Table") {
+            Button(viewModel.hasCaption ? "Hide Caption" : "Show Caption") {
+                viewModel.toggleCaption()
+            }
+
+            Divider()
+
+            Button("Table Attributes…") { viewModel.beginTableAttributes() }
+                .disabled(viewModel.selectedDocumentID == nil)
         }
 
         // Sits after the stock Paste group; ⌘V still pastes text into a

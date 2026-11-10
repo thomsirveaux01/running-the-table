@@ -15,12 +15,6 @@ struct WYSIWYGView: View {
     @StateObject private var dragState = RowDragState()
     @StateObject private var columnDragState = ColumnDragState()
 
-    private struct CellSlot {
-        let index: Int
-        let startCol: Int
-        let span: Int
-    }
-
     var body: some View {
         ScrollView([.horizontal, .vertical]) {
             VStack(alignment: .leading, spacing: Self.divider) {
@@ -38,6 +32,22 @@ struct WYSIWYGView: View {
                                     x: isColLifted(col) ? 3 : 0)
                     }
                 }
+                // The caption sits above the first row but below the column
+                // strip, and stays put while the column handles slide: it
+                // belongs to the table, not to any column.
+                if viewModel.hasCaption {
+                    HStack(spacing: Self.divider) {
+                        Color(NSColor.controlBackgroundColor)
+                            .frame(width: Self.gutterWidth, height: Self.captionHeight)
+                        TextField("Table caption", text: viewModel.captionBinding)
+                            .textFieldStyle(.plain)
+                            .multilineTextAlignment(.center)
+                            .font(.headline)
+                            .padding(.horizontal, 6)
+                            .frame(width: gridColumnsWidth, height: Self.captionHeight)
+                            .background(Color(NSColor.controlBackgroundColor))
+                    }
+                }
                 HStack(spacing: Self.divider) {
                     VStack(spacing: Self.divider) {
                         ForEach(viewModel.table.rows.indices, id: \.self) { row in
@@ -47,17 +57,7 @@ struct WYSIWYGView: View {
                                 .zIndex(isLifted(row) ? 1 : 0)
                         }
                     }
-                    VStack(spacing: Self.divider) {
-                        ForEach(viewModel.table.rows.indices, id: \.self) { row in
-                            rowView(row)
-                                .opacity(dragState.draggedRow == row ? 0.5 : 1)
-                                .offset(y: rowOffset(row))
-                                .zIndex(isLifted(row) ? 1 : 0)
-                                .shadow(color: Color.black.opacity(isLifted(row) ? 0.25 : 0),
-                                        radius: isLifted(row) ? 8 : 0,
-                                        y: isLifted(row) ? 3 : 0)
-                        }
-                    }
+                    cellLayer
                 }
             }
             .padding(Self.divider)
@@ -73,6 +73,71 @@ struct WYSIWYGView: View {
             .animation(.spring(response: 0.28, dampingFraction: 0.82), value: columnDragState.previewTick)
         }
         .background(Color(NSColor.controlBackgroundColor))
+    }
+
+    static let captionHeight: CGFloat = 28
+
+    /// Vertical space the caption band takes inside the padded container.
+    private var captionBandHeight: CGFloat {
+        viewModel.hasCaption ? Self.captionHeight + Self.divider : 0
+    }
+
+    /// Cells float at computed positions so rowspan cells can tower over
+    /// their origin row; the divider gaps still let the separator background
+    /// show through as grid lines.
+    private var cellLayer: some View {
+        let placements = viewModel.table.placements()
+        return ZStack(alignment: .topLeading) {
+            ForEach(viewModel.table.rows.indices, id: \.self) { row in
+                ForEach(placements[row], id: \.cellIndex) { p in
+                    CellView(
+                        viewModel: viewModel,
+                        row: row,
+                        col: p.cellIndex,
+                        startCol: p.startCol,
+                        span: p.colSpan,
+                        rowSpan: p.rowSpan,
+                        width: viewModel.cellWidth(startingAtCol: p.startCol, span: p.colSpan),
+                        height: cellHeight(row: row, rowSpan: p.rowSpan),
+                        visualCellAt: {
+                            Self.visualCell(at: $0, columnWidths: viewModel.columnWidths,
+                                            rowHeights: viewModel.rowHeights,
+                                            captionOffset: captionBandHeight)
+                        }
+                    )
+                    // A merged block slides as a unit with its columns and
+                    // with the row it originates in.
+                    .offset(x: localColumnLeft(p.startCol) + columnShift(p.startCol),
+                            y: localRowTop(row) + rowOffset(row))
+                    .opacity(columnDragState.draggedCol == p.startCol ? 0.5 : 1)
+                    .zIndex(isColLifted(p.startCol) || isLifted(row) ? 1 : 0)
+                    .shadow(color: Color.black.opacity(isColLifted(p.startCol) || isLifted(row) ? 0.25 : 0),
+                            radius: isColLifted(p.startCol) || isLifted(row) ? 8 : 0,
+                            x: isColLifted(p.startCol) ? 3 : 0,
+                            y: isLifted(row) ? 3 : 0)
+                }
+            }
+        }
+        .frame(width: gridColumnsWidth, height: gridHeight)
+    }
+
+    /// Height of a cell that towers over `rowSpan` rows, dividers included.
+    private func cellHeight(row: Int, rowSpan: Int) -> CGFloat {
+        var height = CGFloat(max(rowSpan - 1, 0)) * Self.divider
+        for spanned in row..<min(row + rowSpan, viewModel.rowHeights.count) {
+            height += rowHeight(spanned)
+        }
+        return height
+    }
+
+    /// Left edge of a visual column within the cell layer's own space.
+    private func localColumnLeft(_ col: Int) -> CGFloat {
+        CGFloat(col) * Self.divider + viewModel.columnWidths.prefix(col).reduce(0, +)
+    }
+
+    /// Top edge of a row within the cell layer's own space.
+    private func localRowTop(_ row: Int) -> CGFloat {
+        CGFloat(row) * Self.divider + viewModel.rowHeights.prefix(row).reduce(0, +)
     }
 
     private func rowHeight(_ row: Int) -> CGFloat {
@@ -172,48 +237,6 @@ struct WYSIWYGView: View {
         return columnDragState.settleCol == col && abs(columnDragState.settleOffset) > 0.5
     }
 
-    @ViewBuilder
-    private func rowView(_ row: Int) -> some View {
-        let cells = viewModel.table.rows[row]
-        HStack(spacing: Self.divider) {
-            ForEach(slots(for: cells), id: \.index) { slot in
-                CellView(
-                    viewModel: viewModel,
-                    row: row,
-                    col: slot.index,
-                    startCol: slot.startCol,
-                    span: slot.span,
-                    width: viewModel.cellWidth(startingAtCol: slot.startCol, span: slot.span),
-                    height: row < viewModel.rowHeights.count
-                        ? viewModel.rowHeights[row]
-                        : TableViewModel.defaultRowHeight,
-                    visualCellAt: {
-                        Self.visualCell(at: $0, columnWidths: viewModel.columnWidths,
-                                        rowHeights: viewModel.rowHeights)
-                    }
-                )
-                // A colspan cell slides as a unit with its columns.
-                .offset(x: columnShift(slot.startCol))
-                .opacity(columnDragState.draggedCol == slot.startCol ? 0.5 : 1)
-                .zIndex(isColLifted(slot.startCol) ? 1 : 0)
-                .shadow(color: Color.black.opacity(isColLifted(slot.startCol) ? 0.25 : 0),
-                        radius: isColLifted(slot.startCol) ? 8 : 0,
-                        x: isColLifted(slot.startCol) ? 3 : 0)
-            }
-        }
-    }
-
-    private func slots(for row: TableRow) -> [CellSlot] {
-        var slots: [CellSlot] = []
-        var position = 0
-        for (index, cell) in row.enumerated() {
-            let span = min(max(cell.colspan, TableCell.minColspan), TableCell.maxColspan)
-            slots.append(CellSlot(index: index, startCol: position, span: span))
-            position += span
-        }
-        return slots
-    }
-
     private var gridColumnsWidth: CGFloat {
         viewModel.columnWidths.reduce(0, +)
             + CGFloat(max(viewModel.columnWidths.count - 1, 0)) * Self.divider
@@ -229,9 +252,9 @@ struct WYSIWYGView: View {
         Self.divider + Self.gutterWidth + Self.divider
     }
 
-    /// Row content begins below the column gutter strip.
+    /// Row content begins below the column gutter strip (and caption band).
     private var gridTopEdge: CGFloat {
-        Self.divider + Self.columnGutterHeight + Self.divider
+        Self.divider + Self.columnGutterHeight + Self.divider + captionBandHeight
     }
 
     @ViewBuilder
@@ -262,7 +285,7 @@ struct WYSIWYGView: View {
                        height: rowHeight(source) + Self.divider)
                 .offset(x: Self.divider,
                         y: Self.slotTop(source: source, target: target, rowHeights: viewModel.rowHeights)
-                            + Self.columnGutterHeight + Self.divider)
+                            + Self.columnGutterHeight + Self.divider + captionBandHeight)
                 .allowsHitTesting(false)
         }
     }
@@ -274,7 +297,7 @@ struct WYSIWYGView: View {
             RoundedRectangle(cornerRadius: 2)
                 .fill(Color.accentColor.opacity(0.28))
                 .frame(width: columnWidth(source) + Self.divider,
-                       height: Self.columnGutterHeight + gridHeight)
+                       height: Self.columnGutterHeight + captionBandHeight + gridHeight)
                 .offset(x: gridLeftEdge - Self.divider
                             + Self.slotLeft(source: source, target: target, widths: viewModel.columnWidths),
                         y: Self.divider)
@@ -295,21 +318,21 @@ struct WYSIWYGView: View {
         }
     }
 
-    /// Bounding box of every slot intersecting the selection, so a colspan
+    /// Bounding box of every cell intersecting the selection, so a merged
     /// cell that straddles the range edge is enclosed rather than cut.
     private var selectionRect: CGRect? {
         guard let sel = viewModel.cellSelection, !viewModel.table.rows.isEmpty else { return nil }
         var left = CGFloat.greatestFiniteMagnitude, right = -CGFloat.greatestFiniteMagnitude
         var top = CGFloat.greatestFiniteMagnitude, bottom = -CGFloat.greatestFiniteMagnitude
-        for row in sel.rowStart...sel.rowEnd where viewModel.table.rows.indices.contains(row) {
-            for slot in slots(for: viewModel.table.rows[row])
-            where sel.intersects(row: row, startCol: slot.startCol, span: slot.span) {
-                left = min(left, columnEdge(slot.startCol))
+        for (row, slots) in viewModel.table.placements().enumerated() {
+            for p in slots where sel.intersects(row: row, rowSpan: p.rowSpan,
+                                                startCol: p.startCol, span: p.colSpan) {
+                left = min(left, columnEdge(p.startCol))
                 // columnEdge past the last covered column lands a divider late.
-                right = max(right, columnEdge(slot.startCol + slot.span) - Self.divider)
+                right = max(right, columnEdge(p.startCol + p.colSpan) - Self.divider)
+                top = min(top, rowEdge(row))
+                bottom = max(bottom, rowEdge(row + p.rowSpan) - Self.divider)
             }
-            top = min(top, rowEdge(row))
-            bottom = max(bottom, rowEdge(row + 1) - Self.divider)
         }
         guard right > left, bottom > top else { return nil }
         return CGRect(x: left, y: top, width: right - left, height: bottom - top)
@@ -338,11 +361,12 @@ struct WYSIWYGView: View {
 
     /// Maps a point in the grid document view's top-origin coordinates (where
     /// drag events land) to a visual cell, clamped so drags into the gutters
-    /// or past the far edges extend to the border cells.
+    /// or past the far edges extend to the border cells. `captionOffset` is
+    /// the vertical space the caption band pushes the grid down by.
     static func visualCell(at point: NSPoint, columnWidths: [CGFloat],
-                           rowHeights: [CGFloat]) -> VisualCell? {
+                           rowHeights: [CGFloat], captionOffset: CGFloat = 0) -> VisualCell? {
         guard !columnWidths.isEmpty, !rowHeights.isEmpty else { return nil }
-        return VisualCell(row: axisIndex(point.y - (columnGutterHeight + 2 * divider), rowHeights),
+        return VisualCell(row: axisIndex(point.y - (columnGutterHeight + 2 * divider + captionOffset), rowHeights),
                           column: axisIndex(point.x - (gutterWidth + 2 * divider), columnWidths))
     }
 
@@ -471,64 +495,73 @@ struct RowMoveHandle: View {
     private var isDragged: Bool { dragState.draggedRow == row }
 
     var body: some View {
-        Image(systemName: "line.3.horizontal")
-            .font(.system(size: 10, weight: .semibold))
-            .foregroundStyle(isDragged ? Color.accentColor : Color.secondary.opacity(hovering ? 0.9 : 0.45))
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(isDragged ? Color.accentColor.opacity(0.14) : Color(NSColor.controlBackgroundColor))
-            .contentShape(Rectangle())
-            .gesture(
-                // Global space: the grip shifts during the drag, and local
-                // space would feed that shift back into the translation.
-                DragGesture(minimumDistance: 3, coordinateSpace: .global)
-                    .onChanged { value in
-                        if beforeSnapshot == nil {
-                            beforeSnapshot = viewModel.currentSnapshot()
-                            dragState.settleRow = nil
-                            dragState.settleOffset = 0
-                            dragState.draggedRow = row
-                        }
-                        dragState.translation = value.translation.height
-                        let landing = landingIndex(translationY: value.translation.height)
-                        if dragState.targetRow != landing {
-                            dragState.previewTick += 1
-                            dragState.targetRow = landing
-                        }
-                    }
-                    .onEnded { value in
-                        guard let before = beforeSnapshot else {
-                            dragState.reset()
-                            return
-                        }
-                        beforeSnapshot = nil
-                        let dy = value.translation.height
-                        let dest = landingIndex(translationY: dy)
-                        // The row's current visual top, per rowOffset's math.
-                        let gap = WYSIWYGView.slotTop(source: row, target: dest,
-                                                      rowHeights: viewModel.rowHeights)
-                        let slack = min(max(rowTop(row) + dy - gap, -WYSIWYGView.followSlack),
-                                        WYSIWYGView.followSlack)
-                        let visualTop = gap + slack
-                        viewModel.moveRow(from: row, to: dest, before: before)
-                        // The commit relays rows instantly; pin the row at
-                        // its visual position, then spring it to its new slot.
-                        dragState.settleRow = dest
-                        dragState.settleOffset = visualTop - rowTop(dest)
-                        dragState.reset()
-                        DispatchQueue.main.async {
-                            withAnimation(.spring(response: 0.3, dampingFraction: 0.82)) {
-                                dragState.settleOffset = 0
-                            } completion: {
-                                dragState.settleRow = nil
+        // Rows a merge touches can't travel alone, so their grips go blank —
+        // same treatment colspan-covered columns get.
+        Group {
+            if viewModel.canMoveRow(row) {
+                Image(systemName: "line.3.horizontal")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(isDragged ? Color.accentColor : Color.secondary.opacity(hovering ? 0.9 : 0.45))
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(isDragged ? Color.accentColor.opacity(0.14) : Color(NSColor.controlBackgroundColor))
+                    .contentShape(Rectangle())
+                    .gesture(
+                        // Global space: the grip shifts during the drag, and local
+                        // space would feed that shift back into the translation.
+                        DragGesture(minimumDistance: 3, coordinateSpace: .global)
+                            .onChanged { value in
+                                if beforeSnapshot == nil {
+                                    beforeSnapshot = viewModel.currentSnapshot()
+                                    dragState.settleRow = nil
+                                    dragState.settleOffset = 0
+                                    dragState.draggedRow = row
+                                }
+                                dragState.translation = value.translation.height
+                                let landing = landingIndex(translationY: value.translation.height)
+                                if dragState.targetRow != landing {
+                                    dragState.previewTick += 1
+                                    dragState.targetRow = landing
+                                }
                             }
-                        }
+                            .onEnded { value in
+                                guard let before = beforeSnapshot else {
+                                    dragState.reset()
+                                    return
+                                }
+                                beforeSnapshot = nil
+                                let dy = value.translation.height
+                                let dest = landingIndex(translationY: dy)
+                                // The row's current visual top, per rowOffset's math.
+                                let gap = WYSIWYGView.slotTop(source: row, target: dest,
+                                                              rowHeights: viewModel.rowHeights)
+                                let slack = min(max(rowTop(row) + dy - gap, -WYSIWYGView.followSlack),
+                                                WYSIWYGView.followSlack)
+                                let visualTop = gap + slack
+                                viewModel.moveRow(from: row, to: dest, before: before)
+                                // The commit relays rows instantly; pin the row at
+                                // its visual position, then spring it to its new slot.
+                                dragState.settleRow = dest
+                                dragState.settleOffset = visualTop - rowTop(dest)
+                                dragState.reset()
+                                DispatchQueue.main.async {
+                                    withAnimation(.spring(response: 0.3, dampingFraction: 0.82)) {
+                                        dragState.settleOffset = 0
+                                    } completion: {
+                                        dragState.settleRow = nil
+                                    }
+                                }
+                            }
+                    )
+                    .onHover { hovering in
+                        self.hovering = hovering
+                        if hovering { NSCursor.openHand.push() } else { NSCursor.pop() }
                     }
-            )
-            .onHover { hovering in
-                self.hovering = hovering
-                if hovering { NSCursor.openHand.push() } else { NSCursor.pop() }
+                    .help("Drag to move this row")
+            } else {
+                Color(NSColor.controlBackgroundColor)
             }
-            .help("Drag to move this row")
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private func rowTop(_ index: Int) -> CGFloat {
