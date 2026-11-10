@@ -2,27 +2,54 @@ import AppKit
 
 enum HTMLGenerator {
     static func html(for table: Table) -> String {
-        // The title rides in a data attribute so a title that differs from the
-        // filename survives a relaunch; renderers ignore it, HTMLParser.parse
-        // skips unknown attributes, and only loadStoredDocuments reads it back.
-        let name = table.name.isEmpty ? "" : " data-table-name=\"\(escapeAttribute(table.name))\""
-        var lines: [String] = ["<table\(name)>", "<tbody>"]
-        for row in table.rows {
-            lines.append("  <tr>")
-            for cell in row {
-                let tag = cell.isHeader ? "th" : "td"
-                let colspan = cell.colspan > 1 ? " colspan=\"\(cell.colspan)\"" : ""
-                lines.append("    <\(tag)\(colspan)>\(html(forCell: cell))</\(tag)>")
-            }
-            lines.append("  </tr>")
+        var attrs = ""
+        for attribute in table.attributes where attribute.name != "data-table-name" {
+            attrs += " \(attribute.name)=\"\(escapeAttribute(attribute.value))\""
         }
-        lines.append("</tbody>")
+        // The title rides in a data attribute so a title that differs from the
+        // filename survives a relaunch; renderers ignore it, and only
+        // loadStoredDocuments reads it back.
+        let name = table.name.isEmpty ? "" : " data-table-name=\"\(escapeAttribute(table.name))\""
+        var lines: [String] = ["<table\(attrs)\(name)>"]
+        if let caption = table.caption {
+            lines.append("  <caption>\(table.captionRaw ?? attributedToHTML(caption))</caption>")
+        }
+        lines.append(contentsOf: table.columnMarkup)
+
+        for section in [RowSection.head, .body, .foot] {
+            let rows = table.rows.filter { $0.section == section }
+            guard !rows.isEmpty else { continue }
+            let tag: String
+            switch section {
+            case .head: tag = "thead"
+            case .body: tag = "tbody"
+            case .foot: tag = "tfoot"
+            }
+            lines.append("<\(tag)>")
+            for row in rows {
+                let rowAttrs = row.rawAttributes.isEmpty ? "" : " \(row.rawAttributes)"
+                lines.append("  <tr\(rowAttrs)>")
+                for cell in row {
+                    let tag = cell.isHeader ? "th" : "td"
+                    var cellAttrs = ""
+                    if cell.colspan > 1 { cellAttrs += " colspan=\"\(cell.colspan)\"" }
+                    if cell.rowspan > 1 { cellAttrs += " rowspan=\"\(cell.rowspan)\"" }
+                    if !cell.rawAttributes.isEmpty { cellAttrs += " " + cell.rawAttributes }
+                    // Unedited cells re-emit their parsed interior byte-exact;
+                    // content is only converted after the user touches it.
+                    let inner = cell.rawInnerHTML ?? attributedToHTML(cell.content)
+                    lines.append("    <\(tag)\(cellAttrs)>\(inner)</\(tag)>")
+                }
+                lines.append("  </tr>")
+            }
+            lines.append("</\(tag)>")
+        }
         lines.append("</table>")
-        return lines.joined(separator: "\n")
+        return table.sourcePrefix + lines.joined(separator: "\n") + table.sourceSuffix
     }
 
     static func html(forCell cell: TableCell) -> String {
-        attributedToHTML(cell.content)
+        cell.rawInnerHTML ?? attributedToHTML(cell.content)
     }
 
     static func attributedToHTML(_ text: NSAttributedString) -> String {

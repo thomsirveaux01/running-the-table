@@ -203,7 +203,7 @@ struct WYSIWYGView: View {
         }
     }
 
-    private func slots(for row: [TableCell]) -> [CellSlot] {
+    private func slots(for row: TableRow) -> [CellSlot] {
         var slots: [CellSlot] = []
         var position = 0
         for (index, cell) in row.enumerated() {

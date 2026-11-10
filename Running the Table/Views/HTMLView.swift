@@ -33,6 +33,28 @@ struct HTMLView: View {
             }
             .padding(8)
             Divider()
+            // Hand-typed markup the parser could not honor says so here
+            // instead of vanishing silently on the next regeneration.
+            if !viewModel.markupDiagnostics.isEmpty {
+                HStack(alignment: .top, spacing: 6) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(viewModel.markupDiagnostics.first ?? "")
+                        if viewModel.markupDiagnostics.count > 1 {
+                            Text("plus \(viewModel.markupDiagnostics.count - 1) more markup issue(s)")
+                                .font(.caption)
+                        }
+                    }
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    Spacer()
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 5)
+                .background(Color.orange.opacity(0.12))
+                Divider()
+            }
             NSTextViewRepresentable(
                 content: htmlContent,
                 contentRevision: viewModel.contentRevision,

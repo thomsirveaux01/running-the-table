@@ -27,10 +27,12 @@ struct VisualCellRange: Equatable {
     }
 }
 
-/// Full editor state captured to revert one undo step.
+/// Full editor state captured to revert one undo step. The whole Table (not
+/// just rows) rides along so captions, sections and pass-through markup undo
+/// with the cells around them.
 struct EditorSnapshot {
     let documentID: UUID?
-    let rows: [[TableCell]]
+    let table: Table
     let columnWidths: [CGFloat]
     let rowHeights: [CGFloat]
     let focusedCell: GridCell?
@@ -79,8 +81,11 @@ final class TableViewModel: ObservableObject {
     @Published var showRenamePrompt = false
     @Published var renameTitleText = ""
     @Published var renameFileNameText = ""
+    /// Notes on dropped or unclosed markup in the latest source-pane parse;
+    /// empty whenever the grid generated the HTML.
+    @Published private(set) var markupDiagnostics: [String] = []
     private var renamingID: UUID?
-    private var templateDraftRows: [[TableCell]] = []
+    private var templateDraftTable: Table?
 
     // Prevents recursive WYSIWYG/HTML pane updates during sync.
     var isUpdating = false
@@ -222,7 +227,7 @@ final class TableViewModel: ObservableObject {
 
     func currentSnapshot() -> EditorSnapshot {
         EditorSnapshot(documentID: selectedDocumentID,
-                       rows: deepCopied(table.rows),
+                       table: table.deepCopied(),
                        columnWidths: columnWidths,
                        rowHeights: rowHeights,
                        focusedCell: focusedCell)
@@ -235,7 +240,11 @@ final class TableViewModel: ObservableObject {
             selectedDocumentID = docID
             table = doc.table
         }
-        table.rows = deepCopied(snapshot.rows)
+        var restored = snapshot.table.deepCopied()
+        // The title is document state with its own undo path; row edits must
+        // not resurrect an old name.
+        restored.name = table.name
+        table = restored
         columnWidths = snapshot.columnWidths
         rowHeights = snapshot.rowHeights
         ensureSizing()
@@ -247,20 +256,10 @@ final class TableViewModel: ObservableObject {
     }
 
     // Later edits must never mutate state captured in a snapshot.
-    private func deepCopied(_ rows: [[TableCell]]) -> [[TableCell]] {
-        rows.map { row in
-            row.map { cell in
-                var copy = cell
-                copy.content = NSAttributedString(attributedString: cell.content)
-                return copy
-            }
-        }
-    }
-
     private func deepCopied(_ documents: [TableDocument]) -> [TableDocument] {
         documents.map { doc in
             var copy = doc
-            copy.table.rows = deepCopied(doc.table.rows)
+            copy.table = doc.table.deepCopied()
             return copy
         }
     }
@@ -284,6 +283,9 @@ final class TableViewModel: ObservableObject {
         guard let existing = cell(row: row, col: col), !existing.content.isEqual(to: content) else { return }
         let before = currentSnapshot()
         table.rows[row][col].content = content
+        // The parsed verbatim interior is now stale; content is the source
+        // of truth from here on.
+        table.rows[row][col].rawInnerHTML = nil
         clampSelection(inRow: row, col: col)
         // Wrapped text that outgrew the row pushes its height up (grow-only).
         growRowIfNeeded(row)
@@ -379,6 +381,9 @@ final class TableViewModel: ObservableObject {
 
     func regenerateHTML() {
         isUpdating = true
+        // Generated markup is valid by construction; stale parse notes go.
+        table.diagnostics = []
+        markupDiagnostics = []
         htmlText = HTMLGenerator.html(for: table)
         isUpdating = false
     }
@@ -389,8 +394,10 @@ final class TableViewModel: ObservableObject {
         let before = currentSnapshot()
         isUpdating = true
         htmlText = html
-        table.rows = HTMLParser.parse(html)
-        table.normalize()
+        // A full re-parse: hand-typed captions, colgroups, attributes and
+        // page markup around the table land in the model the same instant.
+        table = Table.loaded(from: HTMLParser.parseTable(html), name: table.name)
+        markupDiagnostics = table.diagnostics
         ensureSizing()
         refreshRowHeights()
         flushToDocument()
@@ -424,7 +431,7 @@ final class TableViewModel: ObservableObject {
         let index = cell.row + (after ? 1 : 0)
         performUndoable(after ? "Add Row" : "Add Row Above") {
             let cols = max(self.table.columnCount, 1)
-            self.table.rows.insert(Array(repeating: TableCell(), count: cols), at: index)
+            self.table.rows.insert(TableRow(cells: Array(repeating: TableCell(), count: cols)), at: index)
             self.table.normalize()
             self.ensureSizing()
             self.focusedCell = GridCell(row: index, column: cell.column)
@@ -504,7 +511,7 @@ final class TableViewModel: ObservableObject {
     }
 
     // Grid column → array index; colspans shift the two apart.
-    func cellIndex(containingColumn col: Int, in row: [TableCell]) -> Int? {
+    func cellIndex(containingColumn col: Int, in row: TableRow) -> Int? {
         var position = 0
         for (index, cell) in row.enumerated() {
             let span = min(max(cell.colspan, TableCell.minColspan), TableCell.maxColspan)
@@ -625,6 +632,7 @@ final class TableViewModel: ObservableObject {
                 mutable.addAttribute(.font, value: transform(font, manager), range: subRange)
             }
             self.table.rows[f.row][f.column].content = mutable
+            self.table.rows[f.row][f.column].rawInnerHTML = nil
             // Bolder/wider glyphs can push wrapped text to extra lines.
             self.growRowIfNeeded(f.row)
             self.flushToDocument()
@@ -698,6 +706,7 @@ final class TableViewModel: ObservableObject {
             let mutable = NSMutableAttributedString(attributedString: c.content)
             mutable.addAttribute(.link, value: url, range: range)
             self.table.rows[f.row][f.column].content = mutable
+            self.table.rows[f.row][f.column].rawInnerHTML = nil
             self.linkURLText = ""
             self.flushToDocument()
             self.regenerateHTML()
@@ -816,9 +825,9 @@ final class TableViewModel: ObservableObject {
 
         let source = documents[idx]
         // Fresh cells and a fresh id: editing the copy must not touch the source.
-        let copy = TableDocument(table: Table(rows: deepCopied(source.table.rows),
-                                              name: uniqueTableName(source.name)),
-                                 fileURL: nil)
+        var copyTable = source.table.deepCopied(id: UUID())
+        copyTable.name = uniqueTableName(source.name)
+        let copy = TableDocument(table: copyTable, fileURL: nil)
         documents.insert(copy, at: idx + 1)
         loadDocument(copy)
 
@@ -930,7 +939,8 @@ final class TableViewModel: ObservableObject {
     func beginTemplateSave(from id: UUID? = nil) {
         flushToDocument()
         let source = id.flatMap { document(id: $0) }?.table ?? table
-        templateDraftRows = deepCopied(source.rows)
+        // Fresh id: a template must never share identity with its source.
+        templateDraftTable = source.deepCopied(id: UUID())
         templateNameText = source.name
         showTemplatePrompt = true
     }
@@ -939,8 +949,9 @@ final class TableViewModel: ObservableObject {
         defer { showTemplatePrompt = false }
         let typed = templateNameText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !typed.isEmpty else { return }
-        var table = Table(rows: templateDraftRows,
-                          name: uniqueName(typed, avoiding: Set(templates.map(\.name))))
+        // Fresh id per save: the same draft may be saved several times.
+        var table = (templateDraftTable ?? Table.new()).deepCopied(id: UUID())
+        table.name = uniqueName(typed, avoiding: Set(templates.map(\.name)))
         table.normalize()
         var template = TableDocument(table: table, fileURL: nil)
         guard let url = Self.writeTemplate(template) else { return }
@@ -949,12 +960,13 @@ final class TableViewModel: ObservableObject {
         templateNameText = ""
     }
 
-    /// A fresh document carrying the template's rows, named after the template
-    /// and numbered if a table already owns that name.
+    /// A fresh document carrying the template's markup, named after the
+    /// template and numbered if a table already owns that name.
     func newTable(fromTemplate template: TableDocument) {
         flushToDocument()
-        var table = Table(rows: deepCopied(template.table.rows),
-                          name: uniqueName(template.name, avoiding: Set(documents.map(\.name))))
+        // Fresh id: the new table is its own document, not the template.
+        var table = template.table.deepCopied(id: UUID())
+        table.name = uniqueName(template.name, avoiding: Set(documents.map(\.name)))
         table.normalize()
         let doc = TableDocument(table: table, fileURL: nil)
         documents.append(doc)
@@ -1007,6 +1019,9 @@ final class TableViewModel: ObservableObject {
         // (restore() deliberately does NOT do this: snapshot heights are exact.)
         refreshRowHeights()
         regenerateHTML()
+        // A file that loaded with markup complaints keeps showing them until
+        // an edit normalizes it; regenerateHTML just cleared the live copy.
+        markupDiagnostics = document.table.diagnostics
         contentRevision += 1
         // Undo history is per table; the old stack would restore stale rows.
         // During an undo/redo of a delete, keep the stack intact.
@@ -1184,8 +1199,7 @@ final class TableViewModel: ObservableObject {
                 // The in-file title wins: the rename dialog lets it differ
                 // from the filename, and only the file keeps both.
                 let name = HTMLParser.tableName(in: html) ?? stemName
-                var table = Table(rows: HTMLParser.parse(html), name: name)
-                table.normalize()
+                let table = Table.loaded(from: HTMLParser.parseTable(html), name: name)
                 return TableDocument(table: table, fileURL: url)
             }
     }
@@ -1207,7 +1221,7 @@ final class TableViewModel: ObservableObject {
         let span: Int
     }
 
-    private func rowSlots(for row: [TableCell]) -> [RowSlot] {
+    private func rowSlots(for row: TableRow) -> [RowSlot] {
         var slots: [RowSlot] = []
         var position = 0
         for (index, cell) in row.enumerated() {
@@ -1270,15 +1284,14 @@ final class TableViewModel: ObservableObject {
     func pasteAsNewTable() {        let pasteboard = NSPasteboard.general
         guard let source = pasteboard.string(forType: .html) ?? pasteboard.string(forType: .string),
               !source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        let rows = HTMLParser.parse(source)
-        guard !rows.isEmpty else { return }
+        let parsed = HTMLParser.parseTable(source)
+        guard !parsed.rows.isEmpty else { return }
         closeTypingGroup()
         flushToDocument()
         let beforeDocuments = deepCopied(documents)
         let beforeSelection = selectedDocumentID
 
-        var table = Table(rows: rows, name: uniquePastedName())
-        table.normalize()
+        let table = Table.loaded(from: parsed, name: uniquePastedName())
         let doc = TableDocument(table: table, fileURL: nil)
         documents.append(doc)
         loadDocument(doc)
@@ -1356,9 +1369,8 @@ final class TableViewModel: ObservableObject {
                     NSLog("Skipping unreadable template file: \(url.path)")
                     return nil
                 }
-                var table = Table(rows: HTMLParser.parse(html),
-                                  name: url.deletingPathExtension().lastPathComponent)
-                table.normalize()
+                let table = Table.loaded(from: HTMLParser.parseTable(html),
+                                         name: url.deletingPathExtension().lastPathComponent)
                 return TableDocument(table: table, fileURL: url)
             }
     }
