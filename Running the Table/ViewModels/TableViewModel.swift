@@ -70,6 +70,14 @@ final class TableViewModel: ObservableObject {
     /// itself so the keystroke stays a text-editing command.
     @Published private(set) var isEditingText = false
 
+    /// Table snapshots offered by New from Template. They live in a subfolder,
+    /// so loadStoredDocuments never lists them as tables.
+    @Published private(set) var templates: [TableDocument] = []
+    @Published var showTemplatePrompt = false
+    @Published var templateNameText = ""
+    @Published var showTemplateManager = false
+    private var templateDraftRows: [[TableCell]] = []
+
     // Prevents recursive WYSIWYG/HTML pane updates during sync.
     var isUpdating = false
 
@@ -81,6 +89,7 @@ final class TableViewModel: ObservableObject {
     init() {
         // All previously saved tables return at launch; none means empty state.
         documents = Self.loadStoredDocuments()
+        templates = Self.loadStoredTemplates()
         selectedDocumentID = nil
         table = Table.new()
         focusedCell = nil
@@ -826,6 +835,84 @@ final class TableViewModel: ObservableObject {
         for id in ids { deleteDocument(id) }
     }
 
+    // MARK: - Templates
+
+    /// Menu and manager order: alphabetical, like the files they are stored as.
+    var sortedTemplates: [TableDocument] {
+        templates.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+    }
+
+    /// "Save as Template…". A context-menu row need not be the selected table,
+    /// so its own rows are the snapshot; the live table needs a flush first.
+    func beginTemplateSave(from id: UUID? = nil) {
+        flushToDocument()
+        let source = id.flatMap { document(id: $0) }?.table ?? table
+        templateDraftRows = deepCopied(source.rows)
+        templateNameText = source.name
+        showTemplatePrompt = true
+    }
+
+    func saveAsTemplate() {
+        defer { showTemplatePrompt = false }
+        let typed = templateNameText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !typed.isEmpty else { return }
+        var table = Table(rows: templateDraftRows,
+                          name: uniqueName(typed, avoiding: Set(templates.map(\.name))))
+        table.normalize()
+        var template = TableDocument(table: table, fileURL: nil)
+        guard let url = Self.writeTemplate(template) else { return }
+        template.fileURL = url
+        templates.append(template)
+        templateNameText = ""
+    }
+
+    /// A fresh document carrying the template's rows, named after the template
+    /// and numbered if a table already owns that name.
+    func newTable(fromTemplate template: TableDocument) {
+        flushToDocument()
+        var table = Table(rows: deepCopied(template.table.rows),
+                          name: uniqueName(template.name, avoiding: Set(documents.map(\.name))))
+        table.normalize()
+        let doc = TableDocument(table: table, fileURL: nil)
+        documents.append(doc)
+        loadDocument(doc)
+    }
+
+    /// Renaming moves the file. The old one goes only after the new write
+    /// succeeds, so a failed write cannot destroy the template.
+    func renameTemplate(_ id: UUID, to newName: String) {
+        guard let idx = templates.firstIndex(where: { $0.id == id }) else { return }
+        let typed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let previous = templates[idx].name
+        guard !typed.isEmpty, typed != previous else { return }
+        var others = Set(templates.map(\.name))
+        others.remove(previous)
+        templates[idx].name = uniqueName(typed, avoiding: others)
+        guard let url = Self.writeTemplate(templates[idx]) else {
+            templates[idx].name = previous
+            return
+        }
+        if let old = templates[idx].fileURL, old != url { try? FileManager.default.removeItem(at: old) }
+        templates[idx].fileURL = url
+    }
+
+    func deleteTemplate(_ id: UUID) {
+        guard let idx = templates.firstIndex(where: { $0.id == id }) else { return }
+        if let url = templates[idx].fileURL { try? FileManager.default.removeItem(at: url) }
+        templates.remove(at: idx)
+    }
+
+    /// "Base", then "Base 2", "Base 3"… until the name is free.
+    private func uniqueName(_ base: String, avoiding taken: Set<String>) -> String {
+        var candidate = base
+        var suffix = 2
+        while taken.contains(candidate) {
+            candidate = "\(base) \(suffix)"
+            suffix += 1
+        }
+        return candidate
+    }
+
     private func loadDocument(_ document: TableDocument) {
         closeTypingGroup()
         selectedDocumentID = document.id
@@ -1138,6 +1225,56 @@ final class TableViewModel: ObservableObject {
         } else {
             deleteSelectedDocument()
         }
+    }
+
+    // Templates sit in a subfolder: contentsOfDirectory is not recursive, so
+    // loadStoredDocuments can never list one as a table.
+    static var templateDirectory: URL {
+        saveDirectory.appendingPathComponent("Templates", isDirectory: true)
+    }
+
+    /// Writes one template and returns where it landed, or nil on failure.
+    private static func writeTemplate(_ template: TableDocument) -> URL? {
+        try? FileManager.default.createDirectory(at: templateDirectory, withIntermediateDirectories: true)
+        let url = templateURL(for: template.name, excluding: template.fileURL)
+        do {
+            try HTMLGenerator.html(for: template.table).write(to: url, atomically: true, encoding: .utf8)
+        } catch {
+            NSLog("Failed to save template: \(error)")
+            return nil
+        }
+        return url
+    }
+
+    // Different names can sanitize to one file ("A/B" and "A-B"), so the
+    // filesystem gets the suffix vote; a template's own file is never taken.
+    private static func templateURL(for name: String, excluding own: URL?) -> URL {
+        let base = sanitizedFileName(name)
+        var candidate = templateDirectory.appendingPathComponent("\(base).html")
+        var suffix = 2
+        while candidate != own, FileManager.default.fileExists(atPath: candidate.path) {
+            candidate = templateDirectory.appendingPathComponent("\(base) \(suffix).html")
+            suffix += 1
+        }
+        return candidate
+    }
+
+    private static func loadStoredTemplates() -> [TableDocument] {
+        let urls = (try? FileManager.default.contentsOfDirectory(at: templateDirectory,
+                                                                 includingPropertiesForKeys: nil)) ?? []
+        return urls
+            .filter { $0.pathExtension.lowercased() == "html" && !$0.lastPathComponent.hasPrefix(".") }
+            .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
+            .compactMap { url in
+                guard let html = try? String(contentsOf: url, encoding: .utf8) else {
+                    NSLog("Skipping unreadable template file: \(url.path)")
+                    return nil
+                }
+                var table = Table(rows: HTMLParser.parse(html),
+                                  name: url.deletingPathExtension().lastPathComponent)
+                table.normalize()
+                return TableDocument(table: table, fileURL: url)
+            }
     }
 
     // Headless harnesses set this: NSHomeDirectory() ignores $HOME for a bare

@@ -42,15 +42,32 @@ struct EditorView: View {
     private var toolbarContent: some ToolbarContent {
         // The leading region reserves a 53pt toggle slot that shifts when the
         // sidebar collapses; the trailing region holds one x in both states.
+        // Same button face in both states; it only gains the pull-down once a
+        // template exists, so a fresh install keeps a plain one-click New.
         ToolbarItem(placement: .automatic) {
-            Button {
-                viewModel.newTable()
-            } label: {
-                Image(systemName: "doc.badge.plus")
+            if viewModel.templates.isEmpty {
+                Button {
+                    viewModel.newTable()
+                } label: {
+                    Image(systemName: "doc.badge.plus")
+                }
+                .keyboardShortcut("n")
+                .help("New table (Cmd+N)")
+                .accessibilityLabel("New Table")
+            } else {
+                Menu {
+                    Button("Blank Table") { viewModel.newTable() }
+                        .keyboardShortcut("n")
+                    Divider()
+                    ForEach(viewModel.sortedTemplates) { template in
+                        Button(template.name) { viewModel.newTable(fromTemplate: template) }
+                    }
+                } label: {
+                    Image(systemName: "doc.badge.plus")
+                }
+                .help("New table from blank or template")
+                .accessibilityLabel("New Table")
             }
-            .keyboardShortcut("n")
-            .help("New table (Cmd+N)")
-            .accessibilityLabel("New Table")
         }
 
         // Explicit spacer: without it the item merges into the next pill.

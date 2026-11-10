@@ -39,6 +39,14 @@ struct ContentView: View {
         // reserves a 53pt toggle slot that shifts when the sidebar collapses.
         // Opaque toolbar surface so sidebar material doesn't reach the title bar.
         .toolbarBackground(Color(nsColor: .windowBackgroundColor), for: .windowToolbar)
+        // Root-level sheets: the save prompt opens from the sidebar menu too,
+        // where EditorView may not be on screen.
+        .sheet(isPresented: $viewModel.showTemplatePrompt) {
+            TemplateNamePrompt(viewModel: viewModel)
+        }
+        .sheet(isPresented: $viewModel.showTemplateManager) {
+            TemplateManagerView(viewModel: viewModel)
+        }
         .frame(minWidth: 900, minHeight: 600)
     }
 
@@ -118,6 +126,9 @@ struct SidebarView: View {
                         swipedID = isRevealed ? document.id : nil
                     }
                     .contextMenu {
+                        Button("Save as Template…") {
+                            viewModel.beginTemplateSave(from: document.id)
+                        }
                         Button("Duplicate") {
                             viewModel.duplicateDocument(document.id)
                         }

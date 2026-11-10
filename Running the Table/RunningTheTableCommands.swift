@@ -6,6 +6,23 @@ struct RunningTheTableCommands: Commands {
     @ObservedObject var viewModel: TableViewModel
 
     var body: some Commands {
+        // Sits beside New Window. The submenu needs a disabled placeholder
+        // while no template exists: .disabled() on a Menu is ignored.
+        CommandGroup(after: .newItem) {
+            Menu("New from Template") {
+                if viewModel.templates.isEmpty {
+                    Button("No Templates") {}.disabled(true)
+                } else {
+                    ForEach(viewModel.sortedTemplates) { template in
+                        Button(template.name) { viewModel.newTable(fromTemplate: template) }
+                    }
+                }
+            }
+
+            Button("Save as Template…") { viewModel.beginTemplateSave() }
+                .disabled(viewModel.selectedDocumentID == nil)
+        }
+
         // Stock items dispatch undo:/redo: down the responder chain, where
         // only cell text views answer — dead whenever focus is elsewhere.
         // Driving the manager directly works from any focus position.
@@ -39,6 +56,10 @@ struct RunningTheTableCommands: Commands {
             }
             .keyboardShortcut(.delete, modifiers: .command)
             .disabled(viewModel.selectedDocumentID == nil || viewModel.isEditingText)
+
+            Divider()
+
+            Button("Manage Templates…") { viewModel.showTemplateManager = true }
         }
 
         // Apple Notes' table chord family (⌥⌘+arrows): the arrow names the
