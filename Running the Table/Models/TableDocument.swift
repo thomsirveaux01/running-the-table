@@ -4,6 +4,10 @@ import Foundation
 struct TableDocument: Identifiable {
     var table: Table
     var fileURL: URL?
+    // Editor-only layout, in-memory like the undo stack: switching tables
+    // must not inherit another table's resized widths and heights.
+    var columnWidths: [CGFloat] = []
+    var rowHeights: [CGFloat] = []
 
     var id: UUID { table.id }
 

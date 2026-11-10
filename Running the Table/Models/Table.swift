@@ -244,8 +244,10 @@ struct Table {
 
 extension Table {
     /// A table loaded from parsed markup, pass-through fields and all.
-    static func loaded(from parsed: ParsedTable, name: String) -> Table {
-        var table = Table(rows: parsed.rows, name: name)
+    /// Callers replacing a live table pass its id: document identity is
+    /// derived from table.id, so a fresh UUID would orphan the document.
+    static func loaded(from parsed: ParsedTable, name: String, id: UUID = UUID()) -> Table {
+        var table = Table(rows: parsed.rows, name: name, id: id)
         table.caption = parsed.caption
         table.captionRaw = parsed.captionRaw
         table.attributes = parsed.attributes

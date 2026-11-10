@@ -398,7 +398,7 @@ final class TableViewModel: ObservableObject {
         htmlText = html
         // A full re-parse: hand-typed captions, colgroups, attributes and
         // page markup around the table land in the model the same instant.
-        table = Table.loaded(from: HTMLParser.parseTable(html), name: table.name)
+        table = Table.loaded(from: HTMLParser.parseTable(html), name: table.name, id: table.id)
         markupDiagnostics = table.diagnostics
         ensureSizing()
         refreshRowHeights()
@@ -412,6 +412,8 @@ final class TableViewModel: ObservableObject {
     private func flushToDocument() {
         guard let idx = currentDocumentIndex else { return }
         documents[idx].table = table
+        documents[idx].columnWidths = columnWidths
+        documents[idx].rowHeights = rowHeights
     }
 
     private func keepFocusValid() {
@@ -1266,12 +1268,15 @@ final class TableViewModel: ObservableObject {
         closeTypingGroup()
         selectedDocumentID = document.id
         table = document.table
+        columnWidths = document.columnWidths
+        rowHeights = document.rowHeights
         focusedCell = GridCell(row: 0, column: 0)
         cellSelection = nil
         ensureSizing()
         // Fresh tables start at the default height; grow to fit their text.
+        // Revisits carry exact heights (grown once, plus manual resizes).
         // (restore() deliberately does NOT do this: snapshot heights are exact.)
-        refreshRowHeights()
+        if document.rowHeights.isEmpty { refreshRowHeights() }
         regenerateHTML()
         // A file that loaded with markup complaints keeps showing them until
         // an edit normalizes it; regenerateHTML just cleared the live copy.
