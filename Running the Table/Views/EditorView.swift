@@ -51,13 +51,13 @@ struct EditorView: View {
                 } label: {
                     Image(systemName: "doc.badge.plus")
                 }
-                .keyboardShortcut("n")
                 .help("New table (Cmd+N)")
                 .accessibilityLabel("New Table")
             } else {
                 Menu {
+                    // ⌘N belongs to File ▸ New Table; a toolbar copy of the
+                    // chord would double-claim it.
                     Button("Blank Table") { viewModel.newTable() }
-                        .keyboardShortcut("n")
                     Divider()
                     ForEach(viewModel.sortedTemplates) { template in
                         Button(template.name) { viewModel.newTable(fromTemplate: template) }

@@ -6,8 +6,16 @@ struct RunningTheTableCommands: Commands {
     @ObservedObject var viewModel: TableViewModel
 
     var body: some Commands {
-        // Sits beside New Window. The submenu needs a disabled placeholder
-        // while no template exists: .disabled() on a Menu is ignored.
+        // ⌘N lands above the stock New Window (remapped to ⌥⌘N in App's
+        // init); a replaced .newItem group would delete New Window, and an
+        // id-carrying WindowGroup never opens its launch window.
+        CommandGroup(before: .newItem) {
+            Button("New Table") { viewModel.newTable() }
+                .keyboardShortcut("n")
+        }
+
+        // The submenu needs a disabled placeholder while no template
+        // exists: .disabled() on a Menu is ignored.
         CommandGroup(after: .newItem) {
             Menu("New from Template") {
                 if viewModel.templates.isEmpty {

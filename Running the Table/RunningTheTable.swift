@@ -7,6 +7,10 @@ import SwiftUI
     // go before WindowGroup builds anything.
     init() {
         NSWindow.allowsAutomaticWindowTabbing = false
+        // ⌘N belongs to New Table, so the stock New Window item moves to
+        // ⌥⌘N through the same user-defaults remap System Settings writes
+        // ("@" = ⌘, "~" = ⌥); AppKit re-applies it on every menu rebuild.
+        UserDefaults.standard.set(["New Window": "@~n"], forKey: "NSUserKeyEquivalents")
     }
 
     var body: some Scene {
