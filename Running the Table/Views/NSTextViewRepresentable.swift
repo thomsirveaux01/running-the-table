@@ -5,12 +5,42 @@ import SwiftUI
 // Focus is never forced from updateNSView — AppKit raises
 // NSInternalInconsistencyException for that; the subclass reports native
 // activation instead.
+/// Row/column edits a cell's context menu offers; the raw value rides along as
+/// the menu item's tag so one action method dispatches all four.
+enum CellCommand: Int {
+    case addRowAbove, addRowBelow, addColumnLeft, addColumnRight
+}
+
+private let cellCommandTitles: [(CellCommand, String)] = [
+    (.addRowAbove, "Add Row Above"), (.addRowBelow, "Add Row Below"),
+    (.addColumnLeft, "Add Column Left"), (.addColumnRight, "Add Column Right"),
+]
+
 final class CellTextView: NSTextView {
     var didBecomeFirstResponderHandler: (() -> Void)?
     var flushPendingEditsHandler: (() -> Void)?
+    /// Non-nil only in the grid: the HTML source pane has no rows to add.
+    var cellCommandHandler: ((CellCommand) -> Void)?
     /// Return true from keyDown handling to consume the event before typing.
     var keyCommandHandler: ((NSEvent) -> Bool)?
     weak var undoManagerOverride: UndoManager?
+    var highlightsCurrentLine = false
+    /// Drag-selection state, set only in the grid: this slot's visual
+    /// rectangle, the grid's point→cell hit-test, and the selection sink.
+    var gridVisualOrigin: VisualCell?
+    var gridVisualSpan = 1
+    var visualCellAt: ((NSPoint) -> VisualCell?)?
+    var cellRangeHandler: ((VisualCellRange?) -> Void)?
+    /// Overrides the watched pointer position (window-base) during a gesture;
+    /// nil reads the real cursor. Test harnesses drive scripted points.
+    var pointerLocationOverride: (() -> NSPoint?)?
+    /// With a cell range selected, ⌘C copies the cells instead of the text;
+    /// returns true when it handled the event. Nil outside the grid.
+    var copyCellsHandler: (() -> Bool)?
+    /// ⌘V with a table on the pasteboard makes a new table instead of dumping
+    /// flat text into the cell; returns true when handled. Nil outside the grid.
+    var pasteTableHandler: (() -> Bool)?
+    private var isDraggingCells = false
 
     // nil, not the shared manager: AppKit's typing path registers ungrouped
     // coalescing undos, which the group-based shared manager throws on.
@@ -23,10 +53,95 @@ final class CellTextView: NSTextView {
         super.keyDown(with: event)
     }
 
+    override func mouseDown(with event: NSEvent) {
+        guard gridVisualOrigin != nil else {
+            super.mouseDown(with: event)
+            return
+        }
+        cellRangeHandler?(nil)
+        isDraggingCells = false
+        // NSTextView.mouseDown pumps the whole click-drag gesture itself —
+        // subclass mouseDragged/mouseUp never fire — so the pointer is watched
+        // from a timer, which runs because the pump spins the runloop in
+        // eventTracking mode (measured, tools/dragsel_probe).
+        let watch = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
+            self?.pollPointer()
+        }
+        RunLoop.current.add(watch, forMode: .eventTracking)
+        RunLoop.current.add(watch, forMode: .default)
+        super.mouseDown(with: event)
+        // The release position must land in the selection even if the watch
+        // never polled between the last move and the mouse-up.
+        pollPointer()
+        watch.invalidate()
+        isDraggingCells = false
+    }
+
+    private func pollPointer() {
+        guard let window else { return }
+        let point: NSPoint
+        if let scripted = pointerLocationOverride?() {
+            point = scripted
+        } else {
+            let screen = NSEvent.mouseLocation
+            point = window.convertFromScreen(NSRect(x: screen.x, y: screen.y, width: 0, height: 0)).origin
+        }
+        gestureMoved(toWindowPoint: point)
+    }
+
+    /// Hit-tests the pointer (window-base coordinates) and updates the range
+    /// selection; the watch timer drives this, and the harness injects points.
+    func gestureMoved(toWindowPoint p: NSPoint) {
+        guard let origin = gridVisualOrigin, let doc = gridDocumentView,
+              let hit = visualCellAt?(doc.convert(p, from: nil)) else { return }
+        let inside = hit.row == origin.row && hit.column >= origin.column
+            && hit.column < origin.column + gridVisualSpan
+        // While the pointer stays in its own slot, text editing is NSTextView's.
+        if inside && !isDraggingCells { return }
+        isDraggingCells = true
+        cellRangeHandler?(VisualCellRange(
+            rowStart: min(origin.row, hit.row), rowEnd: max(origin.row, hit.row),
+            colStart: min(origin.column, hit.column),
+            colEnd: max(origin.column + gridVisualSpan - 1, hit.column)))
+    }
+
+    /// The grid's scroll view is the outermost one above the cell (each cell
+    /// carries its own wrapper); its top-origin document view is the space
+    /// drag hit-tests happen in.
+    private var gridDocumentView: NSView? {
+        var grid: NSScrollView?
+        var view = superview
+        while let s = view {
+            if let scroll = s as? NSScrollView, scroll.documentView !== self { grid = scroll }
+            view = s.superview
+        }
+        return grid?.documentView
+    }
+
     override func becomeFirstResponder() -> Bool {
         let accepted = super.becomeFirstResponder()
         if accepted { didBecomeFirstResponderHandler?() }
         return accepted
+    }
+
+    // IDE-style band behind the caret's line.
+    override func drawBackground(in rect: NSRect) {
+        super.drawBackground(in: rect)
+        guard highlightsCurrentLine,
+              let layoutManager, let container = textContainer,
+              layoutManager.glyphRange(for: container).length > 0 else { return }
+        let caret = min(selectedRange().location, (string as NSString).length)
+        let lastGlyph = layoutManager.glyphRange(for: container).length - 1
+        let glyph = min(layoutManager.glyphIndexForCharacter(at: caret), lastGlyph)
+        var effective = NSRange()
+        let lineRect = layoutManager.lineFragmentRect(forGlyphAt: glyph, effectiveRange: &effective)
+        let origin = textContainerOrigin
+        let band = NSRect(x: bounds.minX, y: lineRect.minY + origin.y,
+                          width: bounds.width, height: lineRect.height)
+        let dirty = band.intersection(rect)
+        guard !dirty.isEmpty else { return }
+        NSColor.quaternaryLabelColor.setFill()
+        dirty.fill()
     }
 
     // The Undo/Redo menu actions land on whoever is first responder; claim
@@ -41,6 +156,24 @@ final class CellTextView: NSTextView {
         undoManagerOverride?.redo()
     }
 
+    // Menu ⌘C arrives here as copy: on the first responder, so a live cell
+    // range takes it over before the text system can copy just this cell.
+    override func copy(_ sender: Any?) {
+        if copyCellsHandler?() == true { return }
+        super.copy(sender)
+    }
+
+    // ⌘V likewise lands here; a copied cell range is a table, so promote it to
+    // its own document rather than flattening every cell into this one.
+    override func paste(_ sender: Any?) {
+        if pasteTableHandler?() == true { return }
+        super.paste(sender)
+    }
+
+    @objc private func performCellCommand(_ sender: NSMenuItem) {
+        if let kind = CellCommand(rawValue: sender.tag) { cellCommandHandler?(kind) }
+    }
+
     override func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         switch menuItem.action {
         case #selector(undo(_:)):
@@ -49,6 +182,53 @@ final class CellTextView: NSTextView {
             return undoManagerOverride?.canRedo ?? false
         default:
             return super.validateMenuItem(menuItem)
+        }
+    }
+
+    // Drops AppKit's system-suggestion cluster and the Font submenu. Selectors
+    // measured offscreen (tools/viewmenu); Font's identifier is nib-generated.
+    override func menu(for event: NSEvent) -> NSMenu? {
+        guard let menu = super.menu(for: event) else { return nil }
+        // "_rvMenuItemAction" is the remote-view item Siri, Look Up, and
+        // Translate are rendered through.
+        let suggestions: Set<String> = ["_rvMenuItemAction", "_searchWithGoogleFromMenu:"]
+        let fontPanel = NSSelectorFromString("orderFrontFontPanel:")
+        // Removals leave leading and doubled dividers; a dropped item counts as
+        // transparent, so dividers either side of the Font submenu collapse too.
+        var previousWasSeparator = true
+        var drop: [NSMenuItem] = []
+        for item in menu.items {
+            let action = item.action.map(NSStringFromSelector) ?? ""
+            if suggestions.contains(action) || item.submenu?.items.contains(where: { $0.action == fontPanel }) == true {
+                drop.append(item)
+            } else if item.isSeparatorItem {
+                if previousWasSeparator { drop.append(item) }
+                previousWasSeparator = true
+            } else {
+                previousWasSeparator = false
+            }
+        }
+        drop.forEach { menu.removeItem($0) }
+        while menu.items.last?.isSeparatorItem == true { menu.removeItem(at: menu.items.count - 1) }
+        insertCellCommands(in: menu)
+        return menu
+    }
+
+    // Grid cells get row/column edits right after the paste group, where the
+    // pruned menu already leaves a divider to close the group with.
+    private func insertCellCommands(in menu: NSMenu) {
+        guard cellCommandHandler != nil else { return }
+        let pasteActions: Set<String> = ["cut:", "copy:", "paste:", "pasteAsPlainText:"]
+        let at = (menu.items.lastIndex { pasteActions.contains($0.action.map(NSStringFromSelector) ?? "") } ?? -1) + 1
+        for (offset, entry) in cellCommandTitles.enumerated() {
+            let item = NSMenuItem(title: entry.1, action: #selector(performCellCommand(_:)), keyEquivalent: "")
+            item.target = self
+            item.tag = entry.0.rawValue
+            menu.insertItem(item, at: at + offset)
+        }
+        if at + cellCommandTitles.count < menu.items.count,
+           !menu.items[at + cellCommandTitles.count].isSeparatorItem {
+            menu.insertItem(.separator(), at: at + cellCommandTitles.count)
         }
     }
 }
@@ -80,6 +260,22 @@ struct NSTextViewRepresentable: NSViewRepresentable {
     /// Keyboard focus follows this flag only on false→true transitions that
     /// start inside the grid, so clicks and doc switches never yank focus.
     var isFocused: Bool = false
+    /// Source-pane decorations (HTML pane only): syntax colors, gutter, caret band.
+    var highlightsSyntax = false
+    var showsLineNumbers = false
+    var highlightsCurrentLine = false
+    /// Row/column commands for the context menu; nil outside the grid.
+    var cellCommands: ((CellCommand) -> Void)? = nil
+    /// Drag-selection support, set only on grid cells: this slot's visual
+    /// rectangle, and the grid's point→cell hit-test and selection sink.
+    var gridVisualOrigin: VisualCell?
+    var gridVisualSpan = 1
+    var visualCellAt: ((NSPoint) -> VisualCell?)?
+    var cellRangeHandler: ((VisualCellRange?) -> Void)?
+    /// With a cell range selected, ⌘C copies the cells; true = handled.
+    var copyCells: (() -> Bool)?
+    /// ⌘V with a table on the pasteboard makes a new table; true = handled.
+    var pasteTable: (() -> Bool)?
 
     /// labelColor is appearance-dynamic; text lacking .foregroundColor
     /// renders BLACK regardless of textColor — invisible in dark mode.
@@ -96,7 +292,16 @@ struct NSTextViewRepresentable: NSViewRepresentable {
     }
 
     func makeNSView(context: Context) -> NSScrollView {
-        let textView = CellTextView()
+        // Explicit TextKit 1 stack at creation: touching .layoutManager on a
+        // default (TextKit 2) view switches layout systems mid-setup and the
+        // layer-backed view then renders blank. Temporary attributes need TK1.
+        let storage = NSTextStorage()
+        let layoutManager = NSLayoutManager()
+        storage.addLayoutManager(layoutManager)
+        let container = NSTextContainer(size: NSSize(width: 100, height: CGFloat.greatestFiniteMagnitude))
+        container.widthTracksTextView = true
+        layoutManager.addTextContainer(container)
+        let textView = CellTextView(frame: NSRect(x: 0, y: 0, width: 100, height: 100), textContainer: container)
         textView.delegate = context.coordinator
         textView.isEditable = true
         textView.isSelectable = true
@@ -114,6 +319,7 @@ struct NSTextViewRepresentable: NSViewRepresentable {
         textView.isAutomaticQuoteSubstitutionEnabled = false
         textView.isAutomaticDashSubstitutionEnabled = false
         textView.isContinuousSpellCheckingEnabled = false
+        textView.isGrammarCheckingEnabled = false
         textView.textContainerInset = NSSize(width: 3, height: 3)
         textView.minSize = .zero
         textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
@@ -135,10 +341,21 @@ struct NSTextViewRepresentable: NSViewRepresentable {
         scrollView.hasHorizontalScroller = false
         scrollView.autohidesScrollers = true
 
+        if showsLineNumbers {
+            let ruler = LineNumberRulerView(textView: textView, scrollView: scrollView)
+            ruler.ruleThickness = 40
+            // AppKit's rule-edge line escapes the ruler and paints a hairline over the pane header.
+            ruler.clipsToBounds = true
+            scrollView.verticalRulerView = ruler
+            scrollView.hasVerticalRuler = true
+            scrollView.rulersVisible = true
+        }
+
         wire(textView: textView, coordinator: context.coordinator)
         context.coordinator.lastAppliedRevision = contentRevision
         context.coordinator.lastFocused = isFocused
         context.coordinator.observeRevision(revision, textView: textView)
+        context.coordinator.refreshDecorations(textView)
         return scrollView
     }
 
@@ -167,10 +384,12 @@ struct NSTextViewRepresentable: NSViewRepresentable {
         }
 
         textView.backgroundColor = Self.background(isHeader: isHeader)
+        context.coordinator.refreshDecorations(textView)
     }
 
     private func wire(textView: CellTextView, coordinator: Coordinator) {
         textView.undoManagerOverride = undoManager
+        textView.highlightsCurrentLine = highlightsCurrentLine
         // Native activation path: click -> becomeFirstResponder -> focus report.
         textView.didBecomeFirstResponderHandler = { [weak coordinator] in
             coordinator?.parent.onFocus()
@@ -181,6 +400,21 @@ struct NSTextViewRepresentable: NSViewRepresentable {
         textView.keyCommandHandler = { [weak coordinator] event in
             coordinator?.parent.onGridKey(event) ?? false
         }
+        // Must go nil outside the grid, or the HTML pane would offer dead row commands.
+        if cellCommands == nil {
+            textView.cellCommandHandler = nil
+        } else {
+            textView.cellCommandHandler = { [weak coordinator] command in
+                guard let commands = coordinator?.parent.cellCommands else { return }
+                commands(command)
+            }
+        }
+        textView.gridVisualOrigin = gridVisualOrigin
+        textView.gridVisualSpan = gridVisualSpan
+        textView.visualCellAt = visualCellAt
+        textView.cellRangeHandler = cellRangeHandler
+        textView.copyCellsHandler = copyCells
+        textView.pasteTableHandler = pasteTable
     }
 
     final class Coordinator: NSObject, NSTextViewDelegate {
@@ -221,11 +455,99 @@ struct NSTextViewRepresentable: NSViewRepresentable {
             guard let textView = notification.object as? NSTextView,
                   let storage = textView.textStorage else { return }
             parent.onTextChange(NSAttributedString(attributedString: storage))
+            refreshDecorations(textView)
         }
 
         func textViewDidChangeSelection(_ notification: Notification) {
             guard let textView = notification.object as? NSTextView else { return }
             parent.onSelectionChange(textView.selectedRange())
+            if parent.highlightsCurrentLine { textView.needsDisplay = true }
         }
+
+        // Derived decoration only: layout-manager temporary attributes never
+        // reach the text storage, so the model, undo, and equality-skip sync
+        // stay untouched.
+        func refreshDecorations(_ textView: NSTextView) {
+            if parent.highlightsSyntax, let layoutManager = textView.layoutManager {
+                let ns = textView.string as NSString
+                let full = NSRange(location: 0, length: ns.length)
+                layoutManager.setTemporaryAttributes([:], forCharacterRange: full)
+                for (range, color) in HTMLHighlighter.colorRuns(in: textView.string) {
+                    layoutManager.setTemporaryAttributes([.foregroundColor: color], forCharacterRange: range)
+                }
+            }
+            textView.enclosingScrollView?.verticalRulerView?.needsDisplay = true
+            if parent.highlightsSyntax || parent.highlightsCurrentLine { textView.needsDisplay = true }
+        }
+    }
+}
+
+// Line-number gutter for the HTML source pane.
+final class LineNumberRulerView: NSRulerView {
+    private weak var textView: NSTextView?
+    private static let labelFont = NSFont.monospacedSystemFont(ofSize: 10, weight: .regular)
+
+    init(textView: NSTextView, scrollView: NSScrollView) {
+        super.init(scrollView: scrollView, orientation: .verticalRuler)
+        self.textView = textView
+        clientView = textView
+    }
+
+    required init(coder: NSCoder) { fatalError("init(coder:) is not used") }
+
+    deinit { NotificationCenter.default.removeObserver(self) }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        guard let clip = scrollView?.contentView else { return }
+        clip.postsBoundsChangedNotifications = true
+        NotificationCenter.default.addObserver(self, selector: #selector(scrollChanged),
+                                               name: NSView.boundsDidChangeNotification, object: clip)
+    }
+
+    @objc private func scrollChanged() { needsDisplay = true }
+
+    override func drawHashMarksAndLabels(in rect: NSRect) {
+        // AppKit hands this method an unclipped, sometimes infinite rect (measured:
+        // ±9e307), not the 40pt strip — filling it paints over the text. Clip it.
+        NSColor.textBackgroundColor.setFill()
+        rect.intersection(bounds).fill()
+        guard let textView, let layoutManager = textView.layoutManager,
+              let container = textView.textContainer else { return }
+        let visible = textView.visibleRect
+        let glyphRange = layoutManager.glyphRange(forBoundingRect: visible, in: container)
+        guard glyphRange.length > 0 else { return }
+
+        let ns = textView.string as NSString
+        let charStart = layoutManager.characterRange(forGlyphRange: glyphRange, actualGlyphRange: nil).location
+        var lineNumber = 1 + newlines(in: ns.substring(to: min(charStart, ns.length)))
+        let inset = textView.textContainerInset
+        let attrs: [NSAttributedString.Key: Any] = [.font: Self.labelFont,
+                                                    .foregroundColor: NSColor.tertiaryLabelColor]
+
+        var index = glyphRange.location
+        while index < NSMaxRange(glyphRange) {
+            var effective = NSRange()
+            let lineRect = layoutManager.lineFragmentRect(forGlyphAt: index, effectiveRange: &effective)
+            let charRange = layoutManager.characterRange(forGlyphRange: effective, actualGlyphRange: nil)
+            // Wrapped fragments repeat their line, so only label fragments that
+            // begin right after a hard break.
+            let startsLine = charRange.location == 0 || ns.character(at: charRange.location - 1) == 10
+            if startsLine {
+                let label = "\(lineNumber)" as NSString
+                let size = label.size(withAttributes: attrs)
+                label.draw(at: NSPoint(x: ruleThickness - 6 - size.width,
+                                       y: lineRect.minY + inset.height - visible.minY
+                                         + (lineRect.height - size.height) / 2),
+                           withAttributes: attrs)
+            }
+            lineNumber += newlines(in: ns.substring(with: charRange))
+            index = NSMaxRange(effective)
+        }
+    }
+
+    /// One line per "\n" — not `isNewline`, which would double-count CRLF files.
+    private func newlines(in text: String) -> Int {
+        text.unicodeScalars.reduce(into: 0) { if $1 == "\n" { $0 += 1 } }
     }
 }

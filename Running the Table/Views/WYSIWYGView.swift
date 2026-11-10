@@ -66,6 +66,7 @@ struct WYSIWYGView: View {
             .overlay(alignment: .topLeading) { resizeHandles }
             .overlay(alignment: .topLeading) { gapHighlight }
             .overlay(alignment: .topLeading) { columnGapHighlight }
+            .overlay(alignment: .topLeading) { selectionBorder }
             // Keyed on previewTick (fires only on landing-slot changes) so
             // the dragged item tracks the cursor 1:1 between bumps.
             .animation(.spring(response: 0.28, dampingFraction: 0.82), value: dragState.previewTick)
@@ -180,10 +181,16 @@ struct WYSIWYGView: View {
                     viewModel: viewModel,
                     row: row,
                     col: slot.index,
+                    startCol: slot.startCol,
+                    span: slot.span,
                     width: viewModel.cellWidth(startingAtCol: slot.startCol, span: slot.span),
                     height: row < viewModel.rowHeights.count
                         ? viewModel.rowHeights[row]
-                        : TableViewModel.defaultRowHeight
+                        : TableViewModel.defaultRowHeight,
+                    visualCellAt: {
+                        Self.visualCell(at: $0, columnWidths: viewModel.columnWidths,
+                                        rowHeights: viewModel.rowHeights)
+                    }
                 )
                 // A colspan cell slides as a unit with its columns.
                 .offset(x: columnShift(slot.startCol))
@@ -275,11 +282,78 @@ struct WYSIWYGView: View {
         }
     }
 
+    /// One continuous accent border around the selected cell rectangle, drawn
+    /// in the padded-container space the resize handles use.
+    @ViewBuilder
+    private var selectionBorder: some View {
+        if let rect = selectionRect {
+            Rectangle()
+                .strokeBorder(Color.accentColor, lineWidth: 2)
+                .frame(width: rect.width, height: rect.height)
+                .offset(x: rect.minX, y: rect.minY)
+                .allowsHitTesting(false)
+        }
+    }
+
+    /// Bounding box of every slot intersecting the selection, so a colspan
+    /// cell that straddles the range edge is enclosed rather than cut.
+    private var selectionRect: CGRect? {
+        guard let sel = viewModel.cellSelection, !viewModel.table.rows.isEmpty else { return nil }
+        var left = CGFloat.greatestFiniteMagnitude, right = -CGFloat.greatestFiniteMagnitude
+        var top = CGFloat.greatestFiniteMagnitude, bottom = -CGFloat.greatestFiniteMagnitude
+        for row in sel.rowStart...sel.rowEnd where viewModel.table.rows.indices.contains(row) {
+            for slot in slots(for: viewModel.table.rows[row])
+            where sel.intersects(row: row, startCol: slot.startCol, span: slot.span) {
+                left = min(left, columnEdge(slot.startCol))
+                // columnEdge past the last covered column lands a divider late.
+                right = max(right, columnEdge(slot.startCol + slot.span) - Self.divider)
+            }
+            top = min(top, rowEdge(row))
+            bottom = max(bottom, rowEdge(row + 1) - Self.divider)
+        }
+        guard right > left, bottom > top else { return nil }
+        return CGRect(x: left, y: top, width: right - left, height: bottom - top)
+    }
+
+    /// Leading edge of visual column i (i == count gives the trailing edge).
+    private func columnEdge(_ i: Int) -> CGFloat {
+        var x = gridLeftEdge
+        for j in 0..<min(i, viewModel.columnWidths.count) { x += columnWidth(j) + Self.divider }
+        return x
+    }
+
+    /// Top edge of visual row j (j == count gives the bottom edge).
+    private func rowEdge(_ j: Int) -> CGFloat {
+        var y = gridTopEdge
+        for k in 0..<min(j, viewModel.rowHeights.count) { y += rowHeight(k) + Self.divider }
+        return y
+    }
+
     /// Top edge of a row in pre-shift layout coordinates.
     private func rowTop(_ row: Int) -> CGFloat {
         guard row > 0, row < viewModel.rowHeights.count else { return Self.divider }
         return Self.divider + viewModel.rowHeights[0..<row].reduce(0, +)
             + CGFloat(row) * Self.divider
+    }
+
+    /// Maps a point in the grid document view's top-origin coordinates (where
+    /// drag events land) to a visual cell, clamped so drags into the gutters
+    /// or past the far edges extend to the border cells.
+    static func visualCell(at point: NSPoint, columnWidths: [CGFloat],
+                           rowHeights: [CGFloat]) -> VisualCell? {
+        guard !columnWidths.isEmpty, !rowHeights.isEmpty else { return nil }
+        return VisualCell(row: axisIndex(point.y - (columnGutterHeight + 2 * divider), rowHeights),
+                          column: axisIndex(point.x - (gutterWidth + 2 * divider), columnWidths))
+    }
+
+    private static func axisIndex(_ offset: CGFloat, _ sizes: [CGFloat]) -> Int {
+        var remaining = offset
+        var index = 0
+        while index < sizes.count - 1, remaining >= sizes[index] + divider {
+            remaining -= sizes[index] + divider
+            index += 1
+        }
+        return index
     }
 
     private func columnBoundaryX(_ column: Int) -> CGFloat {
