@@ -76,6 +76,10 @@ final class TableViewModel: ObservableObject {
     @Published var showTemplatePrompt = false
     @Published var templateNameText = ""
     @Published var showTemplateManager = false
+    @Published var showRenamePrompt = false
+    @Published var renameTitleText = ""
+    @Published var renameFileNameText = ""
+    private var renamingID: UUID?
     private var templateDraftRows: [[TableCell]] = []
 
     // Prevents recursive WYSIWYG/HTML pane updates during sync.
@@ -722,6 +726,85 @@ final class TableViewModel: ObservableObject {
         }
     }
 
+    /// Opens the rename sheet pre-filled with the title and the file stem; an
+    /// unsaved table proposes a stem from its title. Nil means the selection.
+    func beginRename(_ id: UUID? = nil) {
+        guard let id = id ?? selectedDocumentID, let doc = document(id: id) else { return }
+        renamingID = id
+        renameTitleText = doc.name
+        renameFileNameText = doc.fileURL?.deletingPathExtension().lastPathComponent
+            ?? Self.sanitizedFileName(doc.name)
+        showRenamePrompt = true
+    }
+
+    func cancelRename() { showRenamePrompt = false }
+
+    /// Title and filename are set independently here; an inline rename only
+    /// touches the title, because a saved table's path is sticky.
+    func commitRename() {
+        showRenamePrompt = false
+        guard let id = renamingID, let idx = documents.firstIndex(where: { $0.id == id }) else { return }
+        let title = renameTitleText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let fileName = renameFileNameText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !title.isEmpty, !fileName.isEmpty else { return }
+        closeTypingGroup()
+        flushToDocument()
+
+        let beforeDocuments = deepCopied(documents)
+        let beforeSelection = selectedDocumentID
+        let oldTitle = documents[idx].name
+        let oldURL = documents[idx].fileURL
+
+        // Uniquify against other tables' files and orphans on disk (which
+        // would be clobbered by the move), but not the table's own file —
+        // renaming to the name it already has must be a no-op.
+        var taken = Set(documents.compactMap { $0.id == id ? nil : $0.fileURL?.path })
+        taken.formUnion((try? FileManager.default.contentsOfDirectory(
+            at: Self.saveDirectory, includingPropertiesForKeys: nil))?.map(\.path) ?? [])
+        if let oldURL { taken.remove(oldURL.path) }
+        let newURL = Self.uniqueFileURL(for: fileName, taken: &taken)
+
+        if let oldURL, oldURL != newURL {
+            try? FileManager.default.moveItem(at: oldURL, to: newURL)
+        }
+        documents[idx].name = title
+        documents[idx].fileURL = newURL
+        if id == selectedDocumentID {
+            table.name = title
+        }
+        // Persist now: the title lives in the file's data-table-name, and a
+        // rename with no further edits must not wait for the next autosave.
+        saveAllDocuments()
+
+        let afterDocuments = deepCopied(documents)
+        let afterSelection = selectedDocumentID
+        registerFileRenameUndo(undoFile: oldURL, redoFile: newURL, name: "Rename \(oldTitle)",
+                               undoDocs: beforeDocuments, undoSelection: beforeSelection,
+                               redoDocs: afterDocuments, redoSelection: afterSelection)
+    }
+
+    /// Like registerDocumentUndo, plus the file itself travels with the
+    /// document snapshot in both directions.
+    private func registerFileRenameUndo(undoFile: URL?, redoFile: URL?, name: String,
+                                        undoDocs: [TableDocument], undoSelection: UUID?,
+                                        redoDocs: [TableDocument], redoSelection: UUID?) {
+        undoManager.beginUndoGrouping()
+        undoManager.registerUndo(withTarget: self) { target in
+            target.moveFile(from: redoFile, to: undoFile)
+            target.registerFileRenameUndo(undoFile: redoFile, redoFile: undoFile, name: name,
+                                          undoDocs: redoDocs, undoSelection: redoSelection,
+                                          redoDocs: undoDocs, redoSelection: undoSelection)
+            target.restoreDocuments(undoDocs, selection: undoSelection)
+        }
+        undoManager.setActionName(name)
+        undoManager.endUndoGrouping()
+    }
+
+    private func moveFile(from: URL?, to: URL?) {
+        guard let from, let to, FileManager.default.fileExists(atPath: from.path) else { return }
+        try? FileManager.default.moveItem(at: from, to: to)
+    }
+
     /// The copy lands directly below its source and becomes the selection; it
     /// is undoable as one step, like delete.
     func duplicateDocument(_ id: UUID) {
@@ -1030,8 +1113,9 @@ final class TableViewModel: ObservableObject {
         saveAllDocuments()
     }
 
-    // Filenames derive from table names — no save panel; a renamed table's
-    // file follows it.
+    // A table's path is sticky: first save derives one from the title, and
+    // only the rename dialog (or a title set before that first save) moves
+    // the file afterwards, so inline title renames never churn the disk.
     func saveAllDocuments() {
         autosaveTimer?.invalidate()
         autosaveTimer = nil
@@ -1039,7 +1123,9 @@ final class TableViewModel: ObservableObject {
         try? fm.createDirectory(at: Self.saveDirectory, withIntermediateDirectories: true)
         var taken = Set<String>()
         for idx in documents.indices {
-            let url = Self.uniqueFileURL(for: documents[idx].name, taken: &taken)
+            let url = documents[idx].fileURL
+                ?? Self.uniqueFileURL(for: documents[idx].name, taken: &taken)
+            taken.insert(url.path)
             let html = HTMLGenerator.html(for: documents[idx].table)
             if documents[idx].fileURL == url, savedHTML[documents[idx].id] == html { continue }
             do {
@@ -1047,9 +1133,6 @@ final class TableViewModel: ObservableObject {
             } catch {
                 NSLog("Failed to save table: \(error)")
                 continue
-            }
-            if let old = documents[idx].fileURL, old != url {
-                try? fm.removeItem(at: old)
             }
             savedHTML[documents[idx].id] = html
             documents[idx].fileURL = url
@@ -1097,7 +1180,10 @@ final class TableViewModel: ObservableObject {
                 let rawName = url.deletingPathExtension().lastPathComponent
                 // Legacy saves were named "----.html" (the old broken
                 // sanitizer); surface those as "Untitled Table".
-                let name = Self.sanitizedFileName(rawName) == "Untitled Table" ? "Untitled Table" : rawName
+                let stemName = Self.sanitizedFileName(rawName) == "Untitled Table" ? "Untitled Table" : rawName
+                // The in-file title wins: the rename dialog lets it differ
+                // from the filename, and only the file keeps both.
+                let name = HTMLParser.tableName(in: html) ?? stemName
                 var table = Table(rows: HTMLParser.parse(html), name: name)
                 table.normalize()
                 return TableDocument(table: table, fileURL: url)

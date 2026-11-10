@@ -17,6 +17,12 @@ struct RunningTheTableCommands: Commands {
         // The submenu needs a disabled placeholder while no template
         // exists: .disabled() on a Menu is ignored.
         CommandGroup(after: .newItem) {
+            Button("Rename Table…") { viewModel.beginRename() }
+                .keyboardShortcut("r")
+                .disabled(viewModel.selectedDocumentID == nil)
+
+            Divider()
+
             Menu("New from Template") {
                 if viewModel.templates.isEmpty {
                     Button("No Templates") {}.disabled(true)

@@ -10,8 +10,6 @@ struct ContentView: View {
         NavigationSplitView(columnVisibility: $columnVisibility, sidebar: {
             SidebarView(viewModel: viewModel)
                 // A sidebar navigationTitle makes the system re-insert its toggle.
-                // 132 puts the divider flush against the toggle pill (ends 131.5).
-                .navigationSplitViewColumnWidth(132)
                 .toolbar(removing: .sidebarToggle)
                 .toolbar {
                     ToolbarItem(placement: .automatic) {
@@ -27,6 +25,9 @@ struct ContentView: View {
                         .accessibilityLabel("Toggle Sidebar")
                     }
                 }
+                // Notes' sidebar measures 201pt over AX; 200 is the round
+                // default. Must trail the .toolbar modifiers (see facts).
+                .navigationSplitViewColumnWidth(min: 180, ideal: 200, max: 320)
         }, detail: {
             if viewModel.selectedDocumentID != nil {
                 EditorView(viewModel: viewModel)
@@ -46,6 +47,9 @@ struct ContentView: View {
         }
         .sheet(isPresented: $viewModel.showTemplateManager) {
             TemplateManagerView(viewModel: viewModel)
+        }
+        .sheet(isPresented: $viewModel.showRenamePrompt) {
+            RenameTablePrompt(viewModel: viewModel)
         }
         .frame(minWidth: 900, minHeight: 600)
     }
@@ -126,6 +130,9 @@ struct SidebarView: View {
                         swipedID = isRevealed ? document.id : nil
                     }
                     .contextMenu {
+                        Button("Rename…") {
+                            viewModel.beginRename(document.id)
+                        }
                         Button("Save as Template…") {
                             viewModel.beginTemplateSave(from: document.id)
                         }

@@ -7,6 +7,15 @@ enum HTMLParser {
     private static let tagPattern = try! NSRegularExpression(pattern: "(?is)<(/?)([a-zA-Z][a-zA-Z0-9]*)([^>]*)>")
     private static let anyTagPattern = try! NSRegularExpression(pattern: "(?is)<[^>]*>")
     private static let hrefPattern = try! NSRegularExpression(pattern: "(?i)href\\s*=\\s*(?:\"([^\"]*)\"|'([^']*)'|([^\\s>]+))")
+    private static let tableNamePattern = try! NSRegularExpression(pattern: "(?i)<table\\b[^>]*\\bdata-table-name\\s*=\\s*\"([^\"]*)\"")
+
+    /// The title stored in the HTML; nil means fall back to the file stem.
+    static func tableName(in html: String) -> String? {
+        guard let m = tableNamePattern.firstMatch(in: html, range: NSRange(html.startIndex..., in: html)),
+              let r = Range(m.range(at: 1), in: html) else { return nil }
+        let name = decodeEntities(String(html[r]))
+        return name.isEmpty ? nil : name
+    }
 
     // Content without a <table> tag is read as plain text: newlines make
     // rows, tabs make cells.
