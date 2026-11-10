@@ -56,13 +56,13 @@ struct EditorView: View {
         // Explicit spacer: without it the item merges into the next pill.
         ToolbarSpacer(.fixed, placement: .automatic)
 
-        // Toggles light up when the focused cell already carries the attribute.
+        // Toggles light up when the focused cell carries the attribute; their
+        // chords live in the menus, which can print them.
         ToolbarItemGroup(placement: .automatic) {
             Toggle(isOn: viewModel.boldBinding) {
                 Image(systemName: "bold")
             }
             .toggleStyle(.button)
-            .keyboardShortcut("b")
             .help("Bold (Cmd+B)")
             .accessibilityLabel("Bold")
 
@@ -70,14 +70,12 @@ struct EditorView: View {
                 Image(systemName: "italic")
             }
             .toggleStyle(.button)
-            .keyboardShortcut("i")
             .help("Italic (Cmd+I)")
             .accessibilityLabel("Italic")
 
             Button { viewModel.beginLinkEntry() } label: {
                 Image(systemName: "link")
             }
-            .keyboardShortcut("k")
             .help("Insert link (Cmd+K)")
             .accessibilityLabel("Insert Link")
 
@@ -85,7 +83,6 @@ struct EditorView: View {
                 Self.labelImage("th")
             }
             .toggleStyle(.button)
-            .keyboardShortcut("h", modifiers: [.command, .shift])
             .help("Toggle header cell (Cmd+Shift+H)")
         }
 
@@ -102,7 +99,6 @@ struct EditorView: View {
             Button { viewModel.removeRow() } label: {
                 Self.labelImage("tr-")
             }
-            .keyboardShortcut("r", modifiers: [.command, .option, .shift])
             .help("Remove focused row (Cmd+Option+Shift+R)")
 
             Button { viewModel.addColumn() } label: {
@@ -114,7 +110,6 @@ struct EditorView: View {
             Button { viewModel.removeColumn() } label: {
                 Self.labelImage("td-")
             }
-            .keyboardShortcut("c", modifiers: [.command, .option, .shift])
             .help("Remove focused column (Cmd+Option+Shift+C)")
         }
 
