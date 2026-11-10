@@ -7,6 +7,26 @@ struct GridCell: Hashable {
     var column: Int
 }
 
+/// Layout-space cell coordinates: columns are the grid's visual columns, so
+/// a colspan cell covers several, unlike array-indexed GridCell.
+struct VisualCell: Equatable {
+    var row: Int
+    var column: Int
+}
+
+/// A closed rectangle of visual cells — the drag selection's range.
+struct VisualCellRange: Equatable {
+    var rowStart: Int
+    var rowEnd: Int
+    var colStart: Int
+    var colEnd: Int
+
+    /// True when a slot, which may span several columns, intersects the range.
+    func intersects(row: Int, startCol: Int, span: Int) -> Bool {
+        row >= rowStart && row <= rowEnd && startCol <= colEnd && startCol + span - 1 >= colStart
+    }
+}
+
 /// Full editor state captured to revert one undo step.
 struct EditorSnapshot {
     let documentID: UUID?
@@ -40,10 +60,15 @@ final class TableViewModel: ObservableObject {
         }
     }
     @Published var selectionRange = NSRange(location: 0, length: 0)
+    /// Rectangular drag selection in visual coordinates; nil when none.
+    @Published var cellSelection: VisualCellRange?
     @Published var columnWidths: [CGFloat] = []
     @Published var rowHeights: [CGFloat] = []
     @Published var showLinkPrompt = false
     @Published var linkURLText = ""
+    /// True while a text view owns the caret; the ⌘⌫ delete-table chord disables
+    /// itself so the keystroke stays a text-editing command.
+    @Published private(set) var isEditingText = false
 
     // Prevents recursive WYSIWYG/HTML pane updates during sync.
     var isUpdating = false
@@ -77,6 +102,16 @@ final class TableViewModel: ObservableObject {
         NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification,
                                              object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.flushAndSaveAll() }
+        }
+        // AppKit posts no first-responder notification, so re-read it on the
+        // window update pass; a stale value can only refuse to delete.
+        for name in [NSWindow.didUpdateNotification, NSWindow.didBecomeKeyNotification] {
+            NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    let editing = Self.caretInTextView(NSApp.keyWindow)
+                    if self?.isEditingText != editing { self?.isEditingText = editing }
+                }
+            }
         }
         // Cache hits skip every write, so this only renames legacy files.
         saveAllDocuments()
@@ -289,6 +324,7 @@ final class TableViewModel: ObservableObject {
             return true
         case Self.escapeKeyCode:
             closeTypingGroup()
+            cellSelection = nil
             NSApp.keyWindow?.makeFirstResponder(nil)
             return true
         default:
@@ -300,6 +336,7 @@ final class TableViewModel: ObservableObject {
     // stays in the column, clamped at the grid edges.
     func moveFocus(from cell: GridCell, horizontal: Int = 0, vertical: Int = 0) {
         guard !table.rows.isEmpty else { return }
+        cellSelection = nil
         var row = min(max(cell.row, 0), table.rows.count - 1)
         var col = min(max(cell.column, 0), max(table.rows[row].count - 1, 0))
         if horizontal != 0 {
@@ -363,28 +400,41 @@ final class TableViewModel: ObservableObject {
     }
 
     func addRow() {
-        guard let f = focusedCell, f.row < table.rows.count else { return }
-        performUndoable("Add Row") {
+        guard let f = focusedCell else { return }
+        addRow(adjacentTo: f, after: true)
+    }
+
+    /// Anchored on a cell rather than on focus: a context-menu command must act
+    /// on the cell that was right-clicked, which is not the focused cell.
+    func addRow(adjacentTo cell: GridCell, after: Bool) {
+        guard cell.row < table.rows.count else { return }
+        let index = cell.row + (after ? 1 : 0)
+        performUndoable(after ? "Add Row" : "Add Row Above") {
             let cols = max(self.table.columnCount, 1)
-            self.table.rows.insert(Array(repeating: TableCell(), count: cols), at: f.row + 1)
+            self.table.rows.insert(Array(repeating: TableCell(), count: cols), at: index)
             self.table.normalize()
             self.ensureSizing()
-            self.focusedCell = GridCell(row: f.row + 1, column: f.column)
+            self.focusedCell = GridCell(row: index, column: cell.column)
             self.flushToDocument()
             self.regenerateHTML()
         }
     }
 
     func addColumn() {
-        guard let f = focusedCell, f.row < table.rows.count, f.column < table.rows[f.row].count else { return }
-        performUndoable("Add Column") {
+        guard let f = focusedCell else { return }
+        addColumn(adjacentTo: f, after: true)
+    }
+
+    func addColumn(adjacentTo cell: GridCell, after: Bool) {
+        guard cell.row < table.rows.count, cell.column < table.rows[cell.row].count else { return }
+        performUndoable(after ? "Add Column" : "Add Column Left") {
             for row in self.table.rows.indices {
-                let insertAt = min(f.column + 1, self.table.rows[row].count)
+                let insertAt = min(cell.column + (after ? 1 : 0), self.table.rows[row].count)
                 self.table.rows[row].insert(TableCell(), at: insertAt)
             }
             self.table.normalize()
             self.ensureSizing()
-            self.focusedCell = GridCell(row: f.row, column: f.column + 1)
+            self.focusedCell = GridCell(row: cell.row, column: cell.column + (after ? 1 : 0))
             self.flushToDocument()
             self.regenerateHTML()
         }
@@ -663,6 +713,43 @@ final class TableViewModel: ObservableObject {
         }
     }
 
+    /// The copy lands directly below its source and becomes the selection; it
+    /// is undoable as one step, like delete.
+    func duplicateDocument(_ id: UUID) {
+        guard let idx = documents.firstIndex(where: { $0.id == id }) else { return }
+        closeTypingGroup()
+        flushToDocument()
+        let beforeDocuments = deepCopied(documents)
+        let beforeSelection = selectedDocumentID
+
+        let source = documents[idx]
+        // Fresh cells and a fresh id: editing the copy must not touch the source.
+        let copy = TableDocument(table: Table(rows: deepCopied(source.table.rows),
+                                              name: uniqueTableName(source.name)),
+                                 fileURL: nil)
+        documents.insert(copy, at: idx + 1)
+        loadDocument(copy)
+
+        let afterDocuments = deepCopied(documents)
+        let afterSelection = selectedDocumentID
+        // loadDocument clears the undo stack, so the pair registers after it.
+        registerDocumentUndo(name: "Duplicate \(source.name)",
+                             undoTo: beforeDocuments, undoSelection: beforeSelection,
+                             redoTo: afterDocuments, redoSelection: afterSelection)
+    }
+
+    // Finder-style naming: "X copy", then "X copy 2", skipping taken names.
+    private func uniqueTableName(_ base: String) -> String {
+        let taken = Set(documents.map(\.name))
+        var candidate = "\(base) copy"
+        var suffix = 2
+        while taken.contains(candidate) {
+            candidate = "\(base) copy \(suffix)"
+            suffix += 1
+        }
+        return candidate
+    }
+
     /// Deleting a table is undoable: the whole document list plus the
     /// selection are snapshotted and restored as one step.
     func deleteDocument(_ id: UUID) {
@@ -726,6 +813,10 @@ final class TableViewModel: ObservableObject {
         }
     }
 
+    func duplicateSelectedDocument() {
+        if let id = selectedDocumentID { duplicateDocument(id) }
+    }
+
     func deleteSelectedDocument() {
         if let id = selectedDocumentID { deleteDocument(id) }
     }
@@ -740,6 +831,7 @@ final class TableViewModel: ObservableObject {
         selectedDocumentID = document.id
         table = document.table
         focusedCell = GridCell(row: 0, column: 0)
+        cellSelection = nil
         ensureSizing()
         // Fresh tables start at the default height; grow to fit their text.
         // (restore() deliberately does NOT do this: snapshot heights are exact.)
@@ -932,7 +1024,128 @@ final class TableViewModel: ObservableObject {
         pasteboard.setString(htmlText, forType: .string)
     }
 
+    // MARK: - Cell copy / paste
+
+    /// A cell's array index plus the visual columns it occupies; mirrors the
+    /// grid's own slot layout so copy and selection agree on colspan.
+    private struct RowSlot {
+        let index: Int
+        let startCol: Int
+        let span: Int
+    }
+
+    private func rowSlots(for row: [TableCell]) -> [RowSlot] {
+        var slots: [RowSlot] = []
+        var position = 0
+        for (index, cell) in row.enumerated() {
+            let span = min(max(cell.colspan, TableCell.minColspan), TableCell.maxColspan)
+            slots.append(RowSlot(index: index, startCol: position, span: span))
+            position += span
+        }
+        return slots
+    }
+
+    /// The selected rectangle as its own Table: slot colspans clipped to the
+    /// column window, rows padded rectangular.
+    private func subtable(of sel: VisualCellRange) -> Table {
+        var rows: [[TableCell]] = []
+        for row in sel.rowStart...sel.rowEnd where table.rows.indices.contains(row) {
+            var out: [TableCell] = []
+            for slot in rowSlots(for: table.rows[row])
+            where sel.intersects(row: row, startCol: slot.startCol, span: slot.span) {
+                let lo = max(slot.startCol, sel.colStart)
+                let hi = min(slot.startCol + slot.span - 1, sel.colEnd)
+                guard lo <= hi else { continue }
+                var cell = table.rows[row][slot.index]
+                cell.colspan = hi - lo + 1
+                out.append(cell)
+            }
+            if !out.isEmpty { rows.append(out) }
+        }
+        var sub = Table(rows: rows, name: "Pasted Table")
+        sub.normalize()
+        return sub
+    }
+
+    /// ⌘C with a cell range selected copies the cells as a standalone HTML
+    /// table (plus TSV) instead of the focused cell's text. True = handled.
+    func copySelectedCells() -> Bool {
+        guard let sel = cellSelection else { return false }
+        let sub = subtable(of: sel)
+        guard !sub.rows.isEmpty else { return false }
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(HTMLGenerator.html(for: sub), forType: .html)
+        pasteboard.setString(sub.rows.map { row in row.map(\.plainString).joined(separator: "\t") }
+                                 .joined(separator: "\n"), forType: .string)
+        return true
+    }
+
+    /// ⌘V inside a cell: when the clipboard holds a real HTML table (what
+    /// copySelectedCells writes), promote it to its own document instead of
+    /// dumping every cell's text into the focused cell. Plain text and links
+    /// still paste into the cell. True = handled.
+    func pasteTableFromPasteboardIfTable() -> Bool {
+        guard let html = NSPasteboard.general.string(forType: .html),
+              html.range(of: "<table", options: .caseInsensitive) != nil else { return false }
+        pasteAsNewTable()
+        return true
+    }
+
+    /// Creates a new table from the pasteboard — HTML table or tab/newline
+    /// text — as one undoable step, the way Duplicate Table works.
+    func pasteAsNewTable() {        let pasteboard = NSPasteboard.general
+        guard let source = pasteboard.string(forType: .html) ?? pasteboard.string(forType: .string),
+              !source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        let rows = HTMLParser.parse(source)
+        guard !rows.isEmpty else { return }
+        closeTypingGroup()
+        flushToDocument()
+        let beforeDocuments = deepCopied(documents)
+        let beforeSelection = selectedDocumentID
+
+        var table = Table(rows: rows, name: uniquePastedName())
+        table.normalize()
+        let doc = TableDocument(table: table, fileURL: nil)
+        documents.append(doc)
+        loadDocument(doc)
+
+        registerDocumentUndo(name: "Paste as New Table",
+                             undoTo: beforeDocuments, undoSelection: beforeSelection,
+                             redoTo: deepCopied(documents), redoSelection: selectedDocumentID)
+    }
+
+    private func uniquePastedName() -> String {
+        let taken = Set(documents.map(\.name))
+        var candidate = "Pasted Table"
+        var suffix = 2
+        while taken.contains(candidate) { candidate = "Pasted Table \(suffix)"; suffix += 1 }
+        return candidate
+    }
+
+    /// True when a text view owns the caret. Field editors are NSTextViews, so
+    /// cells, the source pane, renames and the link sheet are one check.
+    static func caretInTextView(_ window: NSWindow?) -> Bool {
+        window?.firstResponder is NSTextView
+    }
+
+    /// ⌘⌫ means "delete the table" only with no caret; a disabled menu item
+    /// still swallows its chord, so the keystroke goes back to the text as the
+    /// paragraph delete it names. Live state, not the published flag.
+    func deleteTableChordPressed() {
+        if Self.caretInTextView(NSApp.keyWindow) {
+            NSApp.sendAction(#selector(NSText.deleteToBeginningOfParagraph(_:)), to: nil, from: nil)
+        } else {
+            deleteSelectedDocument()
+        }
+    }
+
+    // Headless harnesses set this: NSHomeDirectory() ignores $HOME for a bare
+    // executable, so an env redirect cannot sandbox the library.
+    static var saveDirectoryOverride: URL?
+
     static var saveDirectory: URL {
+        if let override = saveDirectoryOverride { return override }
         let base = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
             ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Documents")
         return base.appendingPathComponent("Running the Table", isDirectory: true)
