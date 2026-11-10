@@ -48,7 +48,10 @@ struct HTMLView: View {
                 onFocus: {
                     // Leaving the grid commits any open typing run there.
                     viewModel.closeTypingGroup()
-                }
+                },
+                highlightsSyntax: true,
+                showsLineNumbers: true,
+                highlightsCurrentLine: true
             )
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }

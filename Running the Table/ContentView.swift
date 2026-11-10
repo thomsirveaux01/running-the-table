@@ -65,6 +65,31 @@ struct SidebarView: View {
     @State private var editingID: UUID?
     @State private var swipedID: UUID?
 
+    // Notes-style rule. listRowBackground is sized to the whole row, so it lands
+    // on the row boundary; an overlay on the row content stops ~4pt short.
+    @ViewBuilder
+    private func separationRule(after document: TableDocument) -> some View {
+        Color.clear.overlay(alignment: .bottom) {
+            if showsRule(after: document) {
+                Rectangle()
+                    .fill(Color(nsColor: .separatorColor))
+                    .frame(height: 1)
+                    // 10pt matches the selection pill's inset (it spans 10-122).
+                    .padding(.horizontal, 10)
+                    .allowsHitTesting(false)
+            }
+        }
+    }
+
+    // The pill fills the row, so a rule touching it — either under it or against
+    // its top edge — reads as a stray hairline across the highlight.
+    private func showsRule(after document: TableDocument) -> Bool {
+        guard let idx = viewModel.documents.firstIndex(where: { $0.id == document.id }),
+              idx + 1 < viewModel.documents.count else { return false }
+        return viewModel.selectedDocumentID != document.id
+            && viewModel.selectedDocumentID != viewModel.documents[idx + 1].id
+    }
+
     var body: some View {
         List(selection: Binding(
             get: { viewModel.selectedDocumentID },
@@ -93,10 +118,14 @@ struct SidebarView: View {
                         swipedID = isRevealed ? document.id : nil
                     }
                     .contextMenu {
+                        Button("Duplicate") {
+                            viewModel.duplicateDocument(document.id)
+                        }
                         Button("Delete", role: .destructive) {
                             viewModel.deleteDocument(document.id)
                         }
                     }
+                    .listRowBackground(separationRule(after: document))
             }
             .onDelete { offsets in
                 viewModel.deleteDocument(at: offsets)
