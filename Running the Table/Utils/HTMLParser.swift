@@ -1,6 +1,13 @@
 import AppKit
 
 enum HTMLParser {
+    // Precompiled constant patterns; try! only trips on a programmer typo.
+    private static let rowPattern = try! NSRegularExpression(pattern: "(?is)<tr[^>]*>(.*?)</tr>")
+    private static let cellPattern = try! NSRegularExpression(pattern: "(?is)<(t[dh])\\b([^>]*)>(.*?)</\\1>")
+    private static let tagPattern = try! NSRegularExpression(pattern: "(?is)<(/?)([a-zA-Z][a-zA-Z0-9]*)([^>]*)>")
+    private static let anyTagPattern = try! NSRegularExpression(pattern: "(?is)<[^>]*>")
+    private static let hrefPattern = try! NSRegularExpression(pattern: "(?i)href\\s*=\\s*(?:\"([^\"]*)\"|'([^']*)'|([^\\s>]+))")
+
     // Content without a <table> tag is read as plain text: newlines make
     // rows, tabs make cells.
     static func parse(_ html: String) -> [[TableCell]] {
@@ -9,10 +16,10 @@ enum HTMLParser {
         }
 
         var rows: [[TableCell]] = []
-        for rowMatch in matches("(?is)<tr[^>]*>(.*?)</tr>", html) {
+        for rowMatch in matches(Self.rowPattern, html) {
             let rowInner = extracted(rowMatch, group: 1, from: html)
             var cells: [TableCell] = []
-            for cellMatch in matches("(?is)<(t[dh])\\b([^>]*)>(.*?)</\\1>", rowInner) {
+            for cellMatch in matches(Self.cellPattern, rowInner) {
                 let tag = extracted(cellMatch, group: 1, from: rowInner).lowercased()
                 let attributes = extracted(cellMatch, group: 2, from: rowInner)
                 let inner = extracted(cellMatch, group: 3, from: rowInner)
@@ -43,18 +50,13 @@ enum HTMLParser {
     // Cell interior → rich text; honors b/i/strong/em/a/br, ignores the rest.
     static func attributed(fromFragment fragment: String) -> NSMutableAttributedString {
         let result = NSMutableAttributedString()
-        guard let tagRegex = try? NSRegularExpression(pattern: "(?is)<(/?)([a-zA-Z][a-zA-Z0-9]*)([^>]*)>") else {
-            result.append(plainAttributed(decodeEntities(stripTags(fragment))))
-            return result
-        }
-
         let ns = fragment as NSString
         var bold = false
         var italic = false
         var link: URL?
         var lastEnd = 0
 
-        for match in tagRegex.matches(in: fragment, range: NSRange(location: 0, length: ns.length)) {
+        for match in tagPattern.matches(in: fragment, range: NSRange(location: 0, length: ns.length)) {
             let gap = NSRange(location: lastEnd, length: match.range.location - lastEnd)
             if gap.length > 0 {
                 let text = decodeEntities(ns.substring(with: gap))
@@ -93,7 +95,7 @@ enum HTMLParser {
     }
 
     private static func cellFont(bold: Bool, italic: Bool) -> NSFont {
-        var font = NSFont.systemFont(ofSize: 13)
+        var font = NSFont.systemFont(ofSize: NSFont.systemFontSize)
         let manager = NSFontManager.shared
         if bold { font = manager.convert(font, toHaveTrait: .boldFontMask) }
         if italic { font = manager.convert(font, toHaveTrait: .italicFontMask) }
@@ -129,15 +131,13 @@ enum HTMLParser {
     }
 
     static func stripTags(_ text: String) -> String {
-        guard let regex = try? NSRegularExpression(pattern: "(?is)<[^>]*>") else { return text }
         let ns = text as NSString
-        return regex.stringByReplacingMatches(in: text,
-                                              range: NSRange(location: 0, length: ns.length),
-                                              withTemplate: "")
+        return anyTagPattern.stringByReplacingMatches(in: text,
+                                                      range: NSRange(location: 0, length: ns.length),
+                                                      withTemplate: "")
     }
 
-    private static func matches(_ pattern: String, _ text: String) -> [NSTextCheckingResult] {
-        guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
+    private static func matches(_ regex: NSRegularExpression, _ text: String) -> [NSTextCheckingResult] {
         let ns = text as NSString
         return regex.matches(in: text, range: NSRange(location: 0, length: ns.length))
     }
@@ -158,12 +158,9 @@ enum HTMLParser {
     }
 
     private static func extractHref(_ attributeText: String) -> URL? {
-        guard let regex = try? NSRegularExpression(
-            pattern: "(?i)href\\s*=\\s*(?:\"([^\"]*)\"|'([^']*)'|([^\\s>]+))"
-        ) else { return nil }
         let ns = attributeText as NSString
-        guard let match = regex.firstMatch(in: attributeText,
-                                           range: NSRange(location: 0, length: ns.length)) else { return nil }
+        guard let match = hrefPattern.firstMatch(in: attributeText,
+                                                 range: NSRange(location: 0, length: ns.length)) else { return nil }
         for groupIndex in 1...3 {
             let r = match.range(at: groupIndex)
             if r.location != NSNotFound {

@@ -51,7 +51,6 @@ struct HTMLView: View {
                 }
             )
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(Color(NSColor.textBackgroundColor))
         }
         .background(Color(NSColor.textBackgroundColor))
     }

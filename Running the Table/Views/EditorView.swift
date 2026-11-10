@@ -5,9 +5,8 @@ import SwiftUI
 struct EditorView: View {
     @ObservedObject var viewModel: TableViewModel
 
-    // One font definition so drawn labels and the colspan picker match.
+    // One font definition so every drawn toolbar label matches.
     private static let monoNSFont = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
-    private static let monoFont: Font = .system(.body, design: .monospaced)
 
     // macOS merges toolbar items into one pill only for image-like content;
     // a Text label claims its own platter — so labels are drawn as images.
@@ -51,6 +50,7 @@ struct EditorView: View {
             }
             .keyboardShortcut("n")
             .help("New table (Cmd+N)")
+            .accessibilityLabel("New Table")
         }
 
         // Explicit spacer: without it the item merges into the next pill.
@@ -64,6 +64,7 @@ struct EditorView: View {
             .toggleStyle(.button)
             .keyboardShortcut("b")
             .help("Bold (Cmd+B)")
+            .accessibilityLabel("Bold")
 
             Toggle(isOn: viewModel.italicBinding) {
                 Image(systemName: "italic")
@@ -71,12 +72,14 @@ struct EditorView: View {
             .toggleStyle(.button)
             .keyboardShortcut("i")
             .help("Italic (Cmd+I)")
+            .accessibilityLabel("Italic")
 
             Button { viewModel.beginLinkEntry() } label: {
                 Image(systemName: "link")
             }
             .keyboardShortcut("k")
             .help("Insert link (Cmd+K)")
+            .accessibilityLabel("Insert Link")
 
             Toggle(isOn: viewModel.headerBinding) {
                 Self.labelImage("th")

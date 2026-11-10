@@ -68,7 +68,7 @@ struct NSTextViewRepresentable: NSViewRepresentable {
     var contentProvider: () -> NSAttributedString
     var isHeader: Bool
     var scrolls: Bool = false
-    var font: NSFont = NSFont.systemFont(ofSize: 13)
+    var font: NSFont = NSFont.systemFont(ofSize: NSFont.systemFontSize)
     var undoManager: UndoManager? = nil
     var flushPendingEdits: () -> Void = {}
     var onTextChange: (NSAttributedString) -> Void

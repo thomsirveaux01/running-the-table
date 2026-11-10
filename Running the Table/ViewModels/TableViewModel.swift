@@ -50,6 +50,8 @@ final class TableViewModel: ObservableObject {
 
     static let defaultColumnWidth: CGFloat = 140
     static let defaultRowHeight: CGFloat = 32
+    static let minColumnWidth: CGFloat = 40
+    static let minRowHeight: CGFloat = 24
 
     init() {
         // All previously saved tables return at launch; none means empty state.
@@ -556,7 +558,7 @@ final class TableViewModel: ObservableObject {
             let mutable = NSMutableAttributedString(attributedString: c.content)
             let manager = NSFontManager.shared
             mutable.enumerateAttribute(.font, in: range) { value, subRange, _ in
-                let font = (value as? NSFont) ?? NSFont.systemFont(ofSize: 13)
+                let font = (value as? NSFont) ?? NSFont.systemFont(ofSize: NSFont.systemFontSize)
                 mutable.addAttribute(.font, value: transform(font, manager), range: subRange)
             }
             self.table.rows[f.row][f.column].content = mutable
@@ -582,7 +584,7 @@ final class TableViewModel: ObservableObject {
         var sawRun = false
         c.content.enumerateAttribute(.font, in: range) { value, _, _ in
             sawRun = true
-            let font = (value as? NSFont) ?? NSFont.systemFont(ofSize: 13)
+            let font = (value as? NSFont) ?? NSFont.systemFont(ofSize: NSFont.systemFontSize)
             if !NSFontManager.shared.traits(of: font).contains(trait) { all = false }
         }
         return sawRun && all
@@ -762,14 +764,14 @@ final class TableViewModel: ObservableObject {
 
     func setColumnWidth(_ column: Int, to width: CGFloat) {
         guard column >= 0, column < columnWidths.count else { return }
-        columnWidths[column] = max(40, width)
+        columnWidths[column] = max(Self.minColumnWidth, width)
         // Narrower columns rewrap their text; rows grow so it stays visible.
         refreshRowHeights()
     }
 
     func setRowHeight(_ row: Int, to height: CGFloat) {
         guard row >= 0, row < rowHeights.count else { return }
-        rowHeights[row] = max(24, height)
+        rowHeights[row] = max(Self.minRowHeight, height)
     }
 
     private static let cellTextInset: CGFloat = 3
@@ -909,7 +911,10 @@ final class TableViewModel: ObservableObject {
             .filter { $0.pathExtension.lowercased() == "html" && !$0.lastPathComponent.hasPrefix(".") }
             .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
             .compactMap { url in
-                guard let html = try? String(contentsOf: url, encoding: .utf8) else { return nil }
+                guard let html = try? String(contentsOf: url, encoding: .utf8) else {
+                    NSLog("Skipping unreadable table file: \(url.path)")
+                    return nil
+                }
                 let rawName = url.deletingPathExtension().lastPathComponent
                 // Legacy saves were named "----.html" (the old broken
                 // sanitizer); surface those as "Untitled Table".
