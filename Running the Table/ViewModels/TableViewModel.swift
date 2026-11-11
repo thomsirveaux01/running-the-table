@@ -342,6 +342,7 @@ final class TableViewModel: ObservableObject {
     private static let returnKeyCode: UInt16 = 36
     private static let keypadReturnKeyCode: UInt16 = 76
     private static let escapeKeyCode: UInt16 = 53
+    private static let deleteKeyCode: UInt16 = 51
 
     // Unmodified Tab walks the grid, Return walks down a column, Escape
     // commits; everything else (Cmd+C, typing) passes through.
@@ -362,6 +363,9 @@ final class TableViewModel: ObservableObject {
             cellSelection = nil
             NSApp.keyWindow?.makeFirstResponder(nil)
             return true
+        case Self.deleteKeyCode:
+            // A cell block deletes as a block; without one, text editing rules.
+            return clearSelectedCells()
         default:
             return false
         }
@@ -987,6 +991,26 @@ final class TableViewModel: ObservableObject {
             self.flushToDocument()
             self.regenerateHTML()
         }
+    }
+
+    /// Delete/⌘⌫ across a cell block empties every cell it touches — the
+    /// same whole-cell targets formatting uses — as one undoable step.
+    /// Returns true when a block consumed the chord.
+    @discardableResult
+    func clearSelectedCells() -> Bool {
+        let targets = formattingCells()
+        guard targets.count > 1 else { return false }
+        let nonEmpty = targets.filter { (cell(row: $0.row, col: $0.col)?.content.length ?? 0) > 0 }
+        guard !nonEmpty.isEmpty else { return true }
+        performUndoable("Delete Cells") {
+            for t in nonEmpty {
+                self.table.rows[t.row][t.col].content = NSAttributedString(string: "")
+                self.table.rows[t.row][t.col].rawInnerHTML = nil
+            }
+            self.flushToDocument()
+            self.regenerateHTML()
+        }
+        return true
     }
 
     var isHeaderActive: Bool {
@@ -1719,10 +1743,11 @@ final class TableViewModel: ObservableObject {
         window?.firstResponder is NSTextView
     }
 
-    /// ⌘⌫ means "delete the table" only with no caret; a disabled menu item
-    /// still swallows its chord, so the keystroke goes back to the text as the
-    /// paragraph delete it names. Live state, not the published flag.
+    /// ⌘⌫ context: a cell block clears its cells; with no caret it deletes
+    /// the table; otherwise the chord goes back to the text as the paragraph
+    /// delete it names (a disabled menu item still swallows it).
     func deleteTableChordPressed() {
+        if clearSelectedCells() { return }
         if Self.caretInTextView(NSApp.keyWindow) {
             NSApp.sendAction(#selector(NSText.deleteToBeginningOfParagraph(_:)), to: nil, from: nil)
         } else {

@@ -195,13 +195,15 @@ struct RunningTheTableCommands: Commands {
             .keyboardShortcut("d")
             .disabled(viewModel.selectedDocumentID == nil)
 
-            // Greyed while a text view owns the caret; the action also hands
-            // the chord back, because disabled items still swallow it.
-            Button("Delete Table") {
+            // Greyed while a text view owns the caret — except during a cell
+            // block, where the chord must reach the action to clear the block
+            // (a disabled item would swallow it).
+            Button(viewModel.cellSelection == nil ? "Delete Table" : "Delete Cells") {
                 viewModel.deleteTableChordPressed()
             }
             .keyboardShortcut(.delete, modifiers: .command)
-            .disabled(viewModel.selectedDocumentID == nil || viewModel.isEditingText)
+            .disabled(viewModel.selectedDocumentID == nil
+                      || (viewModel.isEditingText && viewModel.cellSelection == nil))
 
             Divider()
 
