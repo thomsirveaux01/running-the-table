@@ -206,9 +206,8 @@ enum HTMLParser {
         var p = ParsedTable()
         p.sourcePrefix = ns.substring(to: tokens[open].range.location)
         let tableAttrs = attributes(in: tokens[open].attributeText).map(\.pair)
-        // Builds 7–10 stored the title in data-table-name; seed the app's
-        // title store from it, then drop it so it never resurfaces as a
-        // user-editable attribute or gets re-emitted.
+        // Seed the app's title store from any legacy data-table-name, then
+        // drop it so it never resurfaces as a user attribute or gets re-emitted.
         p.legacyName = tableAttrs.first { $0.name == "data-table-name" }?.value
         p.attributes = tableAttrs.filter { $0.name != "data-table-name" }
 

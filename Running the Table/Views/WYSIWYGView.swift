@@ -278,7 +278,6 @@ struct WYSIWYGView: View {
         }
     }
 
-    // Accent fill marking the slot the dragged row rides in.
     @ViewBuilder
     private var gapHighlight: some View {
         if let source = dragState.draggedRow, let target = dragState.targetRow, target != source {
@@ -293,7 +292,6 @@ struct WYSIWYGView: View {
         }
     }
 
-    // Accent fill marking the slot the dragged column rides in.
     @ViewBuilder
     private var columnGapHighlight: some View {
         if let source = columnDragState.draggedCol, let target = columnDragState.targetCol, target != source {

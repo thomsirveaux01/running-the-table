@@ -7,7 +7,6 @@ struct Table {
     let id: UUID
 
     // Pass-through markup the grid cannot show but the file must keep.
-    /// Caption text; nil means the table has none.
     var caption: NSAttributedString?
     /// Verbatim caption interior while unedited (wins over `caption`).
     var captionRaw: String?

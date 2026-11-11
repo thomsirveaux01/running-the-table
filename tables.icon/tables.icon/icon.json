@@ -1,0 +1,44 @@
+{
+  "color-space-for-untagged-svg-colors" : "display-p3",
+  "fill" : {
+    "linear-gradient" : [
+      "display-p3:0.81117,0.53603,0.92609,1.00000",
+      "display-p3:0.39924,0.19366,0.65205,1.00000"
+    ]
+  },
+  "groups" : [
+    {
+      "layers" : [
+        {
+          "blend-mode" : "normal",
+          "fill" : "automatic",
+          "image-name" : "table-glyph.png",
+          "name" : "table-glyph",
+          "opacity" : 0.8,
+          "position" : {
+            "scale" : 1.4,
+            "translation-in-points" : [
+              1.3999999999999773,
+              0
+            ]
+          }
+        }
+      ],
+      "name" : "base",
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0.15
+      },
+      "translucency" : {
+        "enabled" : false,
+        "value" : 0
+      }
+    }
+  ],
+  "supported-platforms" : {
+    "circles" : [
+      "watchOS"
+    ],
+    "squares" : "shared"
+  }
+}

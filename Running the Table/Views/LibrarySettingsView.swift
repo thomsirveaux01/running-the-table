@@ -15,11 +15,11 @@ struct LibrarySettingsView: View {
                 Button("Reveal in Finder") {
                     NSWorkspace.shared.activateFileViewerSelecting([LibraryLocation.directory])
                 }
+                Spacer()
+                Button("Done") { library.showSettings = false }
+                    .keyboardShortcut(.defaultAction)
+                    .buttonStyle(.borderedProminent)
             }
-            Text("Templates live in a Templates subfolder here. Point the folder at iCloud Drive, Dropbox, or any synced location and your tables sync with it.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
         }
         .padding(20)
         .frame(width: 520)

@@ -4,7 +4,6 @@ import Foundation
 enum RowSection: String {
     case head, body, foot
 
-    /// Label for the Row Section menu's radio items.
     var menuTitle: String {
         switch self {
         case .head: return "Header"

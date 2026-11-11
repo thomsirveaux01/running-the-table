@@ -2,23 +2,23 @@ import AppKit
 import Combine
 import Foundation
 
-// The library folder is user-granted: the sandbox stays, a one-time panel
-// (or Settings) points the library at any real folder, and the security-scoped
-// bookmark makes autosave there legal forever after. Templates live inside the
-// library, so choosing a cloud-synced folder syncs templates too — no iCloud
-// code anywhere.
+// The library defaults to the sandboxed container Documents (no prompts);
+// Settings can move it anywhere via a security-scoped bookmark that keeps
+// autosave legal there. Templates live inside the library, so a synced folder
+// syncs them too.
 
 /// Folder picking behind a protocol so headless probes script the result
-/// instead of raising a panel on the user's screen.
+/// instead of raising a panel on the user's screen. Presented as a window-
+/// modal sheet (anchored to the titlebar) via the documented beginSheetModal.
 protocol FolderChoosing {
-    func chooseDirectory(message: String, prompt: String, suggestedName: String?, defaultURL: URL?) -> URL?
+    func chooseDirectory(prompt: String, suggestedName: String?, defaultURL: URL?,
+                         into window: NSWindow?, completion: @escaping (URL?) -> Void)
 }
 
 struct SystemFolderChooser: FolderChoosing {
-    func chooseDirectory(message: String, prompt: String, suggestedName: String?, defaultURL: URL?) -> URL? {
-        NSApp.activate(ignoringOtherApps: true)
+    func chooseDirectory(prompt: String, suggestedName: String?, defaultURL: URL?,
+                         into window: NSWindow?, completion: @escaping (URL?) -> Void) {
         let panel = NSOpenPanel()
-        panel.message = message
         panel.prompt = prompt
         panel.canChooseFiles = false
         panel.canChooseDirectories = true
@@ -26,7 +26,15 @@ struct SystemFolderChooser: FolderChoosing {
         panel.showsHiddenFiles = false
         if let suggestedName { panel.nameFieldStringValue = suggestedName }
         panel.directoryURL = defaultURL
-        return panel.runModal() == .OK ? panel.url : nil
+        // Anchored to the key window when there is one; the panel then slides
+        // down from its titlebar instead of floating as a separate window.
+        if let window = window ?? NSApp.keyWindow ?? NSApp.mainWindow {
+            panel.beginSheetModal(for: window) { response in
+                completion(response == .OK ? panel.url : nil)
+            }
+        } else {
+            completion(panel.runModal() == .OK ? panel.url : nil)
+        }
     }
 }
 
@@ -44,7 +52,6 @@ enum LibraryError: Error, LocalizedError {
 enum LibraryLocation {
     static let bookmarkKey = "LibraryFolderBookmark"
     static let grantedPathKey = "LibraryFolderGrantedPath"
-    static let grantDeclinedKey = "LibraryFolderGrantDeclined"
 
     // Injectable seams: probes swap the store, the panel, and the codec — a
     // non-sandboxed probe process cannot mint security-scoped bookmarks.
@@ -74,9 +81,8 @@ enum LibraryLocation {
             .appendingPathComponent("Documents", isDirectory: true)
     }
 
-    /// Pre-grant home: the sandboxed container's Documents (the old default).
-    /// Probes override because a bare executable's Documents is the user's real
-    /// ~/Documents, which no probe may touch.
+    /// Default library: the sandboxed container's Documents. Probes override
+    /// because a bare executable's Documents is the user's real ~/Documents.
     static var containerOverride: URL?
     static var containerDefault: URL {
         if let override = containerOverride { return override }
@@ -108,7 +114,6 @@ enum LibraryLocation {
         stopAccess()
         if let data = writeBookmarkData(url) { defaults.set(data, forKey: bookmarkKey) }
         defaults.set(url.path, forKey: grantedPathKey)
-        defaults.removeObject(forKey: grantDeclinedKey)
         if beginAccess(url) { accessing = url }
         granted = url
     }
@@ -193,97 +198,60 @@ enum LibraryLocation {
     }
 }
 
-// Launch-time and Settings driver: owns the prompt sequence (grant → import,
-// lost-access recovery, change-folder move/copy) and reloads the view model
-// after every root change.
+// Launch-time and Settings driver: owns lost-access recovery and the
+// change-folder move/copy, reloading the view model after every root change.
 @MainActor
 final class LibraryCoordinator: ObservableObject {
     enum Step: Equatable {
         case none
         case lostAccess(path: String)
-        case importOffer(count: Int, from: URL, to: URL)
         case moveOffer(count: Int, from: URL, to: URL)
     }
 
     @Published var step: Step = .none
     @Published var failure: String?
     @Published private(set) var currentPath: String = LibraryLocation.directory.path
+    // Settings is a sheet on the main window, not a window of its own.
+    @Published var showSettings = false
 
     weak var viewModel: TableViewModel?
     private var promptedThisLaunch = false
 
-    /// First ContentView appearance per launch: resolve, or ask once. Cancel
-    /// on first run is remembered so the app never nags again.
+    /// First ContentView appearance per launch: a stored grant resolves; a dead
+    /// one raises recovery. The container default needs no prompt, so launch is
+    /// silent.
     func launchOnce() {
         guard !promptedThisLaunch else { return }
         promptedThisLaunch = true
-        if LibraryLocation.defaults.data(forKey: LibraryLocation.bookmarkKey) != nil {
-            if LibraryLocation.resolveGrant() == nil {
-                let path = LibraryLocation.defaults.string(forKey: LibraryLocation.grantedPathKey) ?? "your tables folder"
-                step = .lostAccess(path: path)
-            }
-        } else if !LibraryLocation.defaults.bool(forKey: LibraryLocation.grantDeclinedKey) {
-            grant(firstRun: true)
+        if LibraryLocation.defaults.data(forKey: LibraryLocation.bookmarkKey) != nil,
+           LibraryLocation.resolveGrant() == nil {
+            let path = LibraryLocation.defaults.string(forKey: LibraryLocation.grantedPathKey) ?? "your tables folder"
+            step = .lostAccess(path: path)
         }
-    }
-
-    func grant(firstRun: Bool) {
-        guard let url = LibraryLocation.chooser.chooseDirectory(
-            message: "Where should your tables live?",
-            prompt: "Create",
-            suggestedName: "Running the Table",
-            defaultURL: LibraryLocation.realDocuments
-        ) else {
-            if firstRun { LibraryLocation.defaults.set(true, forKey: LibraryLocation.grantDeclinedKey) }
-            return
-        }
-        let oldRoot = LibraryLocation.directory
-        let count = LibraryLocation.tableFiles(in: oldRoot).count
-        LibraryLocation.setGrant(url)
-        refreshPath()
-        if firstRun, count > 0 {
-            step = .importOffer(count: count, from: oldRoot, to: url)
-        } else {
-            viewModel?.reloadFromDisk()
-        }
-    }
-
-    func performImport() {
-        guard case let .importOffer(_, from, to) = step else { return }
-        step = .none
-        viewModel?.saveAllDocuments()
-        do {
-            try LibraryLocation.copyLibrary(from: from, to: to)
-            TableViewModel.rekeyTitles(from: from, to: to)
-        } catch {
-            failure = error.localizedDescription
-        }
-        viewModel?.reloadFromDisk()
-    }
-
-    func declineImport() {
-        guard case .importOffer = step else { return }
-        step = .none
-        viewModel?.reloadFromDisk()
     }
 
     func changeFolder() {
         let current = LibraryLocation.directory
-        guard let chosen = LibraryLocation.chooser.chooseDirectory(
-            message: "Choose a new folder for your tables",
+        LibraryLocation.chooser.chooseDirectory(
             prompt: "Choose",
             suggestedName: nil,
-            defaultURL: current
-        ) else { return }
-        guard chosen.resolvingSymlinksInPath() != current.resolvingSymlinksInPath() else { return }
-        let count = LibraryLocation.tableFiles(in: current).count
-        guard count > 0 else {
-            LibraryLocation.setGrant(chosen)
-            refreshPath()
-            viewModel?.reloadFromDisk()
-            return
+            defaultURL: current,
+            into: nil
+        ) { [weak self] chosen in
+            guard let self, let chosen else { return }
+            guard chosen.resolvingSymlinksInPath() != current.resolvingSymlinksInPath() else { return }
+            let count = LibraryLocation.tableFiles(in: current).count
+            guard count > 0 else {
+                LibraryLocation.setGrant(chosen)
+                self.refreshPath()
+                self.viewModel?.reloadFromDisk()
+                return
+            }
+            // The move sheet rides the same window as the Settings sheet, so
+            // Settings steps aside first.
+            self.showSettings = false
+            self.step = .moveOffer(count: count, from: current, to: chosen)
         }
-        step = .moveOffer(count: count, from: current, to: chosen)
     }
 
     // The grant only lands once the files have, so a failed copy leaves the
@@ -312,17 +280,19 @@ final class LibraryCoordinator: ObservableObject {
     func regrantAfterLoss() {
         let remembered = LibraryLocation.defaults.string(forKey: LibraryLocation.grantedPathKey)
             .map { URL(fileURLWithPath: $0, isDirectory: true) }
-        guard let url = LibraryLocation.chooser.chooseDirectory(
-            message: "Choose your tables folder again",
+        LibraryLocation.chooser.chooseDirectory(
             prompt: "Choose",
             suggestedName: nil,
-            defaultURL: remembered ?? LibraryLocation.realDocuments
-        ) else { return }
-        LibraryLocation.setGrant(url)
-        refreshPath()
-        if let remembered { TableViewModel.rekeyTitles(from: remembered, to: url) }
-        step = .none
-        viewModel?.reloadFromDisk()
+            defaultURL: remembered ?? LibraryLocation.realDocuments,
+            into: nil
+        ) { [weak self] url in
+            guard let self, let url else { return }
+            LibraryLocation.setGrant(url)
+            self.refreshPath()
+            if let remembered { TableViewModel.rekeyTitles(from: remembered, to: url) }
+            self.step = .none
+            self.viewModel?.reloadFromDisk()
+        }
     }
 
     func useContainerFallback() {

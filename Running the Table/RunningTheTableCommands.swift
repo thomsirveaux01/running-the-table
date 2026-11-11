@@ -7,6 +7,7 @@ struct RunningTheTableCommands: Commands {
     @ObservedObject var viewModel: TableViewModel
     // Defaulted so menu probes compile the identical commands unchanged.
     @ObservedObject var updater: UpdateChecker = UpdateChecker()
+    @ObservedObject var library: LibraryCoordinator = LibraryCoordinator()
 
     var body: some Commands {
         // The stock About item, re-issued so the panel gets our credits block.
@@ -17,6 +18,12 @@ struct RunningTheTableCommands: Commands {
             Button("Check for Updates…") {
                 Task { await updater.check(userInitiated: true) }
             }
+        }
+
+        // Settings is an in-app sheet, so the stock window slot must raise it.
+        CommandGroup(replacing: .appSettings) {
+            Button("Settings…") { library.showSettings = true }
+                .keyboardShortcut(",", modifiers: .command)
         }
 
         // ⌘N lands above the stock New Window (remapped to ⌥⌘N in App's
@@ -50,9 +57,8 @@ struct RunningTheTableCommands: Commands {
                 .disabled(viewModel.selectedDocumentID == nil)
         }
 
-        // Stock items dispatch undo:/redo: down the responder chain, where
-        // only cell text views answer — dead whenever focus is elsewhere.
-        // Driving the manager directly works from any focus position.
+        // Stock undo:/redo: dispatch down the responder chain, which only cell
+        // text views answer; driving the manager works from any focus.
         CommandGroup(replacing: .undoRedo) {
             Button(viewModel.undoManager.undoMenuItemTitle) {
                 viewModel.undoFromMenu()
@@ -67,9 +73,8 @@ struct RunningTheTableCommands: Commands {
             .disabled(!viewModel.undoManager.canRedo)
         }
 
-        // Apple Notes' table chord family (⌥⌘+arrows): the arrow names the
-        // edge, and ⌥⌘ keeps it clear of NSTextView's ⌥/⌘ caret motions.
-        // CommandMenu has no placement knob, so this lands after View.
+        // Chord family: the arrow names the edge, and ⌥⌘ keeps it clear of
+        // NSTextView's ⌥/⌘ caret motions. CommandMenu has no placement knob.
         CommandMenu("Insert") {
             Button("Add Row Above") { insertRow(after: false) }
                 .keyboardShortcut(.upArrow, modifiers: [.command, .option])
@@ -103,15 +108,12 @@ struct RunningTheTableCommands: Commands {
 
             Divider()
 
-            // Ellipsis: the command opens the URL sheet, per macOS convention.
             Button("Add Link…") { viewModel.beginLinkEntry() }
                 .keyboardShortcut("k")
                 .disabled(viewModel.focusedCell == nil)
 
             Divider()
 
-            // Table-wide constructs that don't belong to one cell; the label
-            // mirrors whether a caption is currently shown.
             Button(viewModel.hasCaption ? "Hide Caption" : "Show Caption") {
                 viewModel.toggleCaption()
             }
@@ -161,8 +163,6 @@ struct RunningTheTableCommands: Commands {
                 .keyboardShortcut("M", modifiers: [.command, .option, .shift])
                 .disabled(!viewModel.canSplitFocused)
 
-            // Which HTML section the focused row lives in; the generator
-            // groups rows by it when it writes thead/tbody/tfoot.
             Menu("Row Section") {
                 ForEach([RowSection.head, .body, .foot], id: \.self) { section in
                     Button {

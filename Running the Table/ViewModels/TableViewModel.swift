@@ -98,7 +98,6 @@ final class TableViewModel: ObservableObject {
     static let minRowHeight: CGFloat = 24
 
     init() {
-        // All previously saved tables return at launch; none means empty state.
         documents = Self.loadStoredDocuments()
         templates = Self.loadStoredTemplates()
         selectedDocumentID = nil
@@ -138,7 +137,7 @@ final class TableViewModel: ObservableObject {
     }
 
     /// Re-read tables and templates after the library root moves underneath
-    /// the running app (grant, import, folder change, container fallback).
+    /// the running app (Settings change or container fallback).
     func reloadFromDisk() {
         flushToDocument()
         documents = Self.loadStoredDocuments()
@@ -667,13 +666,19 @@ final class TableViewModel: ObservableObject {
     }
 
     func toggleHeader() {
-        guard let f = focusedCell, let c = cell(row: f.row, col: f.column) else { return }
-        performUndoable(c.isHeader ? "Make Body Cell" : "Make Header Cell") {
-            self.table.rows[f.row][f.column].isHeader.toggle()
+        let targets = formattingCells()
+        guard !targets.isEmpty else { return }
+        let makeHeader = !targets.allSatisfy { cell(row: $0.row, col: $0.col)?.isHeader ?? false }
+        let label = targets.count == 1
+            ? (makeHeader ? "Make Header Cell" : "Make Body Cell")
+            : (makeHeader ? "Make Header Cells" : "Make Body Cells")
+        performUndoable(label) {
+            for t in targets { self.table.rows[t.row][t.col].isHeader = makeHeader }
             // <thead> belongs to all-<th> rows: the last header cell leaving
             // drops the row to the body, the first one back wins it again.
-            if self.table.rows[f.row].allHeaders, self.table.rows[f.row].section == .body {
-                self.table.rows[f.row].section = .head
+            for row in Set(targets.map(\.row))
+            where self.table.rows[row].allHeaders && self.table.rows[row].section == .body {
+                self.table.rows[row].section = .head
             }
             self.demoteNonHeaderRows()
             self.flushToDocument()
@@ -914,60 +919,97 @@ final class TableViewModel: ObservableObject {
     }
 
     func toggleBold() {
-        applyTraitToggle(name: "Toggle Bold") { font, manager in
-            let hasBold = manager.traits(of: font).contains(.boldFontMask)
-            return manager.convert(font, toHaveTrait: hasBold ? .unboldFontMask : .boldFontMask)
+        applyTraitToggle(name: "Toggle Bold", trait: .boldFontMask) { font, manager, remove in
+            manager.convert(font, toHaveTrait: remove ? .unboldFontMask : .boldFontMask)
         }
     }
 
     func toggleItalic() {
-        applyTraitToggle(name: "Toggle Italic") { font, manager in
-            let hasItalic = manager.traits(of: font).contains(.italicFontMask)
-            return manager.convert(font, toHaveTrait: hasItalic ? .unitalicFontMask : .italicFontMask)
+        applyTraitToggle(name: "Toggle Italic", trait: .italicFontMask) { font, manager, remove in
+            manager.convert(font, toHaveTrait: remove ? .unitalicFontMask : .italicFontMask)
         }
+    }
+
+    /// The cells a formatting command applies to: every slot intersecting a
+    /// multi-cell drag selection (whole cells — a merge cannot be half-styled),
+    /// else the focused cell's text selection, whole cell if none.
+    private func formattingCells() -> [(row: Int, col: Int, range: NSRange)] {
+        if let sel = cellSelection {
+            let cells = table.placements().enumerated().flatMap { row, slots in
+                slots.filter { p in
+                    sel.intersects(row: row, rowSpan: p.rowSpan, startCol: p.startCol, span: p.colSpan)
+                }.map { p in (row: row, col: p.cellIndex, range: table.rows[row][p.cellIndex].fullRange) }
+            }
+            if cells.count > 1 { return cells }
+        }
+        guard let f = focusedCell, let c = cell(row: f.row, col: f.column) else { return [] }
+        let range = c.selectionRange.length > 0 ? c.selectionRange : c.fullRange
+        return [(row: f.row, col: f.column, range: range)]
     }
 
     // NSFont has no .weight/.symbolicTraits in this SDK and the trait-mask
     // types aren't nameable, so NSFontManager does the arithmetic.
-    private func applyTraitToggle(name: String, _ transform: (NSFont, NSFontManager) -> NSFont) {
-        guard let f = focusedCell, let c = cell(row: f.row, col: f.column) else { return }
-        let range = c.selectionRange.length > 0 ? c.selectionRange : c.fullRange
-        guard range.length > 0 else { return }
-        performUndoable(name) {
-            let mutable = NSMutableAttributedString(attributedString: c.content)
-            let manager = NSFontManager.shared
-            mutable.enumerateAttribute(.font, in: range) { value, subRange, _ in
+    private func applyTraitToggle(name: String, trait: NSFontTraitMask,
+                                  _ transform: (NSFont, NSFontManager, Bool) -> NSFont) {
+        let targets = formattingCells()
+        let multi = targets.count > 1
+        // One decision for a whole multi-cell selection: strip the trait only
+        // when every targeted character already has it; otherwise apply it.
+        let remove = multi && targets.allSatisfy { target in
+            guard let c = cell(row: target.row, col: target.col), target.range.length > 0 else { return true }
+            var all = true
+            c.content.enumerateAttribute(.font, in: target.range) { value, _, _ in
                 let font = (value as? NSFont) ?? NSFont.systemFont(ofSize: NSFont.systemFontSize)
-                mutable.addAttribute(.font, value: transform(font, manager), range: subRange)
+                if !NSFontManager.shared.traits(of: font).contains(trait) { all = false }
             }
-            self.table.rows[f.row][f.column].content = mutable
-            self.table.rows[f.row][f.column].rawInnerHTML = nil
+            return all
+        }
+        guard targets.contains(where: { $0.range.length > 0 }) else { return }
+        performUndoable(name) {
+            let manager = NSFontManager.shared
+            var touchedRows = Set<Int>()
+            for target in targets {
+                guard let c = self.cell(row: target.row, col: target.col), target.range.length > 0 else { continue }
+                let mutable = NSMutableAttributedString(attributedString: c.content)
+                mutable.enumerateAttribute(.font, in: target.range) { value, subRange, _ in
+                    let font = (value as? NSFont) ?? NSFont.systemFont(ofSize: NSFont.systemFontSize)
+                    // A single cell toggles per run (each run's own state
+                    // decides); a multi-cell selection applies one decision.
+                    let flip = multi ? remove : manager.traits(of: font).contains(trait)
+                    mutable.addAttribute(.font, value: transform(font, manager, flip), range: subRange)
+                }
+                self.table.rows[target.row][target.col].content = mutable
+                self.table.rows[target.row][target.col].rawInnerHTML = nil
+                touchedRows.insert(target.row)
+            }
             // Bolder/wider glyphs can push wrapped text to extra lines.
-            self.growRowIfNeeded(f.row)
+            for row in touchedRows.sorted() { self.growRowIfNeeded(row) }
             self.flushToDocument()
             self.regenerateHTML()
         }
     }
 
     var isHeaderActive: Bool {
-        guard let f = focusedCell, let c = cell(row: f.row, col: f.column) else { return false }
-        return c.isHeader
+        let targets = formattingCells()
+        guard !targets.isEmpty else { return false }
+        return targets.allSatisfy { self.cell(row: $0.row, col: $0.col)?.isHeader ?? false }
     }
 
-    // Toolbar toggles read "on" only when every character of the focused
-    // selection (whole cell if none) already carries the trait.
+    // Toolbar toggles read "on" only when every character of every targeted
+    // cell already carries the trait.
     private func selectionHasTrait(_ trait: NSFontTraitMask) -> Bool {
-        guard let f = focusedCell, let c = cell(row: f.row, col: f.column) else { return false }
-        let range = c.selectionRange.length > 0 ? c.selectionRange : c.fullRange
-        guard range.length > 0 else { return false }
-        var all = true
-        var sawRun = false
-        c.content.enumerateAttribute(.font, in: range) { value, _, _ in
-            sawRun = true
-            let font = (value as? NSFont) ?? NSFont.systemFont(ofSize: NSFont.systemFontSize)
-            if !NSFontManager.shared.traits(of: font).contains(trait) { all = false }
+        let targets = formattingCells().filter { $0.range.length > 0 }
+        guard !targets.isEmpty else { return false }
+        for target in targets {
+            guard let c = cell(row: target.row, col: target.col) else { continue }
+            var all = true
+            c.content.enumerateAttribute(.font, in: target.range) { value, _, _ in
+                let font = (value as? NSFont) ?? NSFont.systemFont(ofSize: NSFont.systemFontSize)
+                if !NSFontManager.shared.traits(of: font).contains(trait) { all = false }
+            }
+            if !all { return false }
         }
-        return sawRun && all
+        return true
     }
 
     var isBoldActive: Bool { selectionHasTrait(.boldFontMask) }
@@ -1503,8 +1545,7 @@ final class TableViewModel: ObservableObject {
     }
 
     // Letters, digits, spaces and " -_.()" survive; the rest become '-' and
-    // runs collapse. Legacy "----.html" files came from the old inverted-set
-    // sanitizer.
+    // runs collapse.
     static func sanitizedFileName(_ name: String) -> String {
         let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: " -_.()"))
         let mapped = name.unicodeScalars.map { allowed.contains($0) ? $0 : UnicodeScalar("-") }
@@ -1518,11 +1559,9 @@ final class TableViewModel: ObservableObject {
 
     // MARK: - Title store
 
-    /// Titles are the app's own metadata, never HTML: a file lives under its
-    /// path, and a title that differs from the file stem is remembered here.
-    /// Document UUIDs are regenerated at every load, so paths are the key.
-    /// The map is rebuilt wholesale from the live documents whenever they
-    /// change, which keeps undo, deletes, and orphaned files honest.
+    /// App-side title metadata (never written into HTML), keyed by path because
+    /// Document UUIDs regenerate every load. Rebuilt wholesale from the live
+    /// documents on change, which keeps undo, deletes, and orphans honest.
     private static let titlesByPathKey = "TableTitlesByPath"
 
     // contentsOfDirectory reports symlinked paths resolved (/tmp → /private/tmp),
@@ -1558,7 +1597,6 @@ final class TableViewModel: ObservableObject {
         UserDefaults.standard.set(map, forKey: titlesByPathKey)
     }
 
-    // Everything the user ever saved returns at launch from the save directory.
     private static func loadStoredDocuments() -> [TableDocument] {
         let urls = (try? FileManager.default.contentsOfDirectory(at: saveDirectory,
                                                                  includingPropertiesForKeys: nil)) ?? []
@@ -1571,12 +1609,11 @@ final class TableViewModel: ObservableObject {
                     return nil
                 }
                 let rawName = url.deletingPathExtension().lastPathComponent
-                // Legacy saves were named "----.html" (the old broken
-                // sanitizer); surface those as "Untitled Table".
+                // Legacy saves named "----.html" surface as "Untitled Table".
                 let stemName = Self.sanitizedFileName(rawName) == "Untitled Table" ? "Untitled Table" : rawName
                 let parsed = HTMLParser.parseTable(html)
-                // App-side title wins; builds 7–10 kept it in the file, and
-                // the stem is the fallback for tables never retitled.
+                // Precedence: stored title, then a legacy in-file name, then
+                // the file stem for tables never retitled.
                 let seed = parsed.legacyName?.trimmingCharacters(in: .whitespacesAndNewlines)
                 let name = Self.storedTitle(for: url) ?? (seed?.isEmpty == false ? seed! : stemName)
                 return TableDocument(table: Table.loaded(from: parsed, name: name), fileURL: url)

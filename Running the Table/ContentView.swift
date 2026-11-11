@@ -29,8 +29,7 @@ struct ContentView: View {
                         .accessibilityLabel("Toggle Sidebar")
                     }
                 }
-                // Notes' sidebar measures 201pt over AX; 200 is the round
-                // default. Must trail the .toolbar modifiers (see facts).
+                // Must trail the .toolbar modifiers (see facts).
                 .navigationSplitViewColumnWidth(min: 180, ideal: 200, max: 320)
         }, detail: {
             if viewModel.selectedDocumentID != nil {
@@ -63,19 +62,14 @@ struct ContentView: View {
         .alert(alertTitle, isPresented: promptShown, actions: { alertButtons }, message: {
             Text(alertMessage)
         })
-        // Library-folder prompts (grant flow lives in the App scene).
         .alert("Lost Access to Your Tables", isPresented: lostAccessShown) {
             Button("Choose Folder…") { library.regrantAfterLoss() }
             Button("Use Container", role: .cancel) { library.useContainerFallback() }
         } message: {
             Text("The app can no longer reach \(lostPath). Re-select it to keep your tables there, or fall back to the app's container.")
         }
-        .sheet(isPresented: importShown) {
-            libraryChoiceSheet(title: "Import Your Existing Tables?",
-                               body: "Copy \(importCount) table(s) from the app's container into \(importTo.path)? The originals stay as a backup.",
-                               confirm: "Import",
-                               onConfirm: { library.performImport() },
-                               onCancel: { library.declineImport() })
+        .sheet(isPresented: $library.showSettings) {
+            LibrarySettingsView(library: library)
         }
         .sheet(isPresented: moveShown) {
             libraryChoiceSheet(title: "Move Your Tables?",
@@ -101,17 +95,6 @@ struct ContentView: View {
     private var lostPath: String {
         if case let .lostAccess(path) = library.step { return path }
         return ""
-    }
-
-    private var importShown: Binding<Bool> {
-        Binding(get: { if case .importOffer = library.step { return true }; return false }, set: { _ in })
-    }
-    private var importCount: Int {
-        if case let .importOffer(count, _, _) = library.step { return count }; return 0
-    }
-    private var importTo: URL {
-        if case let .importOffer(_, _, to) = library.step { return to }
-        return LibraryLocation.directory
     }
 
     private var moveShown: Binding<Bool> {
@@ -176,9 +159,8 @@ struct ContentView: View {
         case .upToDate:
             "Version \(updater.currentVersion) is the latest release."
         case .checkFailed:
-            // Deliberately vague: fires for dead networks, rate limits, and a
-            // 404 (no GitHub Release published yet) alike — only "unreachable"
-            // would be wrong for the latter two.
+            // Vague on purpose: covers dead networks, rate limits, and a 404
+            // (no release published yet) alike.
             "Couldn't check for updates. Try again later."
         case nil:
             ""
@@ -219,8 +201,8 @@ struct SidebarView: View {
     @State private var editingID: UUID?
     @State private var swipedID: UUID?
 
-    // Notes-style rule. listRowBackground is sized to the whole row, so it lands
-    // on the row boundary; an overlay on the row content stops ~4pt short.
+    // listRowBackground is sized to the whole row, so it lands on the row
+    // boundary; an overlay on the row content stops ~4pt short.
     @ViewBuilder
     private func separationRule(after document: TableDocument) -> some View {
         Color.clear.overlay(alignment: .bottom) {
@@ -228,7 +210,7 @@ struct SidebarView: View {
                 Rectangle()
                     .fill(Color(nsColor: .separatorColor))
                     .frame(height: 1)
-                    // 10pt matches the selection pill's inset (it spans 10-122).
+                    // 10pt matches the selection pill's inset.
                     .padding(.horizontal, 10)
                     .allowsHitTesting(false)
             }

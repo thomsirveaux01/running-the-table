@@ -9,28 +9,25 @@ import SwiftUI
     // go before WindowGroup builds anything.
     init() {
         NSWindow.allowsAutomaticWindowTabbing = false
-        // ⌘N belongs to New Table, so the stock New Window item moves to
-        // ⌥⌘N through the same user-defaults remap System Settings writes
-        // ("@" = ⌘, "~" = ⌥); AppKit re-applies it on every menu rebuild.
+        // ⌘N belongs to New Table, so the stock New Window rides ⌥⌘N via the
+        // user-defaults remap AppKit re-applies on every menu rebuild.
         UserDefaults.standard.set(["New Window": "@~n"], forKey: "NSUserKeyEquivalents")
     }
 
     var body: some Scene {
         WindowGroup {
             ContentView(viewModel: viewModel, updater: updater, library: library)
-                // The grant flow lives here, not in ContentView, so offscreen
-                // probes hosting ContentView never raise the panel.
+                // Library launch work lives here, not in ContentView, so
+                // offscreen probes hosting ContentView never touch the panel.
                 .task {
                     library.viewModel = viewModel
                     library.launchOnce()
                 }
         }
         .commands {
-            RunningTheTableCommands(viewModel: viewModel, updater: updater)
+            RunningTheTableCommands(viewModel: viewModel, updater: updater, library: library)
         }
-
-        Settings {
-            LibrarySettingsView(library: library)
-        }
+        // No Settings scene by design: Settings… raises a sheet on the main
+        // window (see commands), so no stray windows.
     }
 }
