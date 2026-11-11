@@ -8,6 +8,9 @@ struct ParsedTable {
     var caption: NSAttributedString?
     var captionRaw: String?
     var attributes: [HTMLAttribute] = []
+    /// Title from a legacy `data-table-name` attribute, if present; used
+    /// only to seed the app's title store, never shown as a user attribute.
+    var legacyName: String?
     var columnMarkup: [String] = []
     var sourcePrefix = ""
     var sourceSuffix = ""
@@ -202,10 +205,12 @@ enum HTMLParser {
 
         var p = ParsedTable()
         p.sourcePrefix = ns.substring(to: tokens[open].range.location)
-        p.attributes = attributes(in: tokens[open].attributeText).map(\.pair)
-            // Legacy saves carried the title here; drop it so it never
-            // resurfaces as a user-editable attribute.
-            .filter { $0.name != "data-table-name" }
+        let tableAttrs = attributes(in: tokens[open].attributeText).map(\.pair)
+        // Builds 7–10 stored the title in data-table-name; seed the app's
+        // title store from it, then drop it so it never resurfaces as a
+        // user-editable attribute or gets re-emitted.
+        p.legacyName = tableAttrs.first { $0.name == "data-table-name" }?.value
+        p.attributes = tableAttrs.filter { $0.name != "data-table-name" }
 
         var i = open + 1
         var section: RowSection = .body

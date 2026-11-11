@@ -6,8 +6,8 @@ enum HTMLGenerator {
         for attribute in table.attributes {
             attrs += " \(attribute.name)=\"\(escapeAttribute(attribute.value))\""
         }
-        // The title is the file stem; nothing identifying is written into the
-        // HTML itself.
+        // The title lives in the app (see TableViewModel's title store);
+        // nothing identifying is written into the HTML.
         var lines: [String] = ["<table\(attrs)>"]
         if let caption = table.caption {
             lines.append("  <caption>\(table.captionRaw ?? attributedToHTML(caption))</caption>")

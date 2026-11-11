@@ -2,6 +2,7 @@ import AppKit
 
 struct Table {
     var rows: [TableRow]
+    /// Table title; app-side metadata that may differ from the file's stem.
     var name: String
     let id: UUID
 

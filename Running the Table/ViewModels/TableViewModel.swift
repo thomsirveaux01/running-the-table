@@ -81,6 +81,7 @@ final class TableViewModel: ObservableObject {
     @Published var templateNameText = ""
     @Published var showTemplateManager = false
     @Published var showRenamePrompt = false
+    @Published var renameTitleText = ""
     @Published var renameFileNameText = ""
     /// Notes on dropped or unclosed markup in the latest source-pane parse;
     /// empty whenever the grid generated the HTML.
@@ -824,7 +825,7 @@ final class TableViewModel: ObservableObject {
 
     func beginTableAttributes() {
         flushToDocument()
-        // The title is the file name; the sheet owns all table attributes.
+        // The title has its own dialog; the sheet owns everything else.
         attributesDraft = table.attributes
         showTableAttributes = true
     }
@@ -983,6 +984,8 @@ final class TableViewModel: ObservableObject {
         loadDocument(doc)
     }
 
+    /// Inline sidebar rename: the title is app-side metadata, so keystrokes
+    /// never touch the file — only the rename sheet moves files.
     func renameDocument(_ id: UUID, to newName: String) {
         guard let idx = documents.firstIndex(where: { $0.id == id }) else { return }
         let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -990,13 +993,15 @@ final class TableViewModel: ObservableObject {
         if id == selectedDocumentID {
             table.name = documents[idx].name
         }
+        Self.syncTitleStore(with: documents)
     }
 
-    /// Opens the rename sheet pre-filled with the current file stem; an
+    /// Opens the rename sheet pre-filled with the title and the file stem; an
     /// unsaved table proposes a stem from its title. Nil means the selection.
     func beginRename(_ id: UUID? = nil) {
         guard let id = id ?? selectedDocumentID, let doc = document(id: id) else { return }
         renamingID = id
+        renameTitleText = doc.name
         renameFileNameText = doc.fileURL?.deletingPathExtension().lastPathComponent
             ?? Self.sanitizedFileName(doc.name)
         showRenamePrompt = true
@@ -1007,31 +1012,16 @@ final class TableViewModel: ObservableObject {
     func commitRename() {
         showRenamePrompt = false
         guard let id = renamingID else { return }
+        let title = renameTitleText.trimmingCharacters(in: .whitespacesAndNewlines)
         let fileName = renameFileNameText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !fileName.isEmpty else { return }
-        applyRename(id: id, fileName: fileName)
+        guard !title.isEmpty, !fileName.isEmpty else { return }
+        applyRename(id: id, title: title, fileName: fileName)
     }
 
-    /// The sidebar field retitles per keystroke; this moves the file to
-    /// match when editing ends. Unsaved tables have no file to move yet
-    /// (autosave derives the name from the title on first save), and a
-    /// blanked field (already folded to "Untitled Table") reverts to the
-    /// on-disk stem instead of clobbering the file.
-    func commitInlineRename(_ id: UUID) {
-        guard let idx = documents.firstIndex(where: { $0.id == id }) else { return }
-        guard let stem = documents[idx].fileURL?.deletingPathExtension().lastPathComponent else { return }
-        if documents[idx].name == "Untitled Table", stem != "Untitled Table" {
-            documents[idx].name = stem
-            if id == selectedDocumentID { table.name = stem }
-            return
-        }
-        guard documents[idx].name != stem else { return }
-        applyRename(id: id, fileName: documents[idx].name)
-    }
-
-    /// Moves the document's file and retitles the document to the stem that
-    /// actually landed on disk — title and file stem are one and the same.
-    private func applyRename(id: UUID, fileName: String) {
+    /// Sets the title and moves the file if the stem changed. A title that
+    /// differs from the file stem is remembered in the app-side title
+    /// store, never written into the HTML.
+    private func applyRename(id: UUID, title: String, fileName: String) {
         guard let idx = documents.firstIndex(where: { $0.id == id }) else { return }
         closeTypingGroup()
         flushToDocument()
@@ -1053,15 +1043,15 @@ final class TableViewModel: ObservableObject {
         if let oldURL, oldURL != newURL {
             try? FileManager.default.moveItem(at: oldURL, to: newURL)
         }
-        let landed = newURL.deletingPathExtension().lastPathComponent
-        documents[idx].name = landed
+        documents[idx].name = title
         documents[idx].fileURL = newURL
         if id == selectedDocumentID {
-            table.name = landed
+            table.name = title
         }
         // Persist now: a rename with no further edits must not wait for the
         // next autosave.
         saveAllDocuments()
+        Self.syncTitleStore(with: documents)
 
         let afterDocuments = deepCopied(documents)
         let afterSelection = selectedDocumentID
@@ -1141,6 +1131,9 @@ final class TableViewModel: ObservableObject {
 
         documents.remove(at: idx)
         savedHTML.removeValue(forKey: id)
+        // Drop the deleted table's title key now; an undo re-adds it via
+        // restoreDocuments.
+        Self.syncTitleStore(with: documents)
         // The file goes with it; an undo restores the table and the next
         // autosave pass writes the file back.
         if let removedFileURL {
@@ -1181,6 +1174,8 @@ final class TableViewModel: ObservableObject {
 
     private func restoreDocuments(_ docs: [TableDocument], selection: UUID?) {
         documents = deepCopied(docs)
+        // Titles ride with the documents they belong to.
+        Self.syncTitleStore(with: documents)
         if let sel = selection, let doc = documents.first(where: { $0.id == sel }) {
             loadDocument(doc)
         } else if let first = documents.first {
@@ -1470,11 +1465,34 @@ final class TableViewModel: ObservableObject {
         return cleaned.isEmpty ? "Untitled Table" : cleaned
     }
 
+    // MARK: - Title store
+
+    /// Titles are the app's own metadata, never HTML: a file lives under its
+    /// path, and a title that differs from the file stem is remembered here.
+    /// Document UUIDs are regenerated at every load, so paths are the key.
+    /// The map is rebuilt wholesale from the live documents whenever they
+    /// change, which keeps undo, deletes, and orphaned files honest.
+    private static let titlesByPathKey = "TableTitlesByPath"
+
+    private static func storedTitle(for url: URL) -> String? {
+        (UserDefaults.standard.dictionary(forKey: titlesByPathKey) as? [String: String])?[url.path]
+    }
+
+    private static func syncTitleStore(with docs: [TableDocument]) {
+        var map: [String: String] = [:]
+        for doc in docs {
+            guard let url = doc.fileURL else { continue }
+            let stem = url.deletingPathExtension().lastPathComponent
+            if doc.name != stem { map[url.path] = doc.name }
+        }
+        UserDefaults.standard.set(map, forKey: titlesByPathKey)
+    }
+
     // Everything the user ever saved returns at launch from the save directory.
     private static func loadStoredDocuments() -> [TableDocument] {
         let urls = (try? FileManager.default.contentsOfDirectory(at: saveDirectory,
                                                                  includingPropertiesForKeys: nil)) ?? []
-        return urls
+        let docs: [TableDocument] = urls
             .filter { $0.pathExtension.lowercased() == "html" && !$0.lastPathComponent.hasPrefix(".") }
             .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
             .compactMap { url in
@@ -1485,10 +1503,18 @@ final class TableViewModel: ObservableObject {
                 let rawName = url.deletingPathExtension().lastPathComponent
                 // Legacy saves were named "----.html" (the old broken
                 // sanitizer); surface those as "Untitled Table".
-                let name = Self.sanitizedFileName(rawName) == "Untitled Table" ? "Untitled Table" : rawName
-                let table = Table.loaded(from: HTMLParser.parseTable(html), name: name)
-                return TableDocument(table: table, fileURL: url)
+                let stemName = Self.sanitizedFileName(rawName) == "Untitled Table" ? "Untitled Table" : rawName
+                let parsed = HTMLParser.parseTable(html)
+                // App-side title wins; builds 7–10 kept it in the file, and
+                // the stem is the fallback for tables never retitled.
+                let seed = parsed.legacyName?.trimmingCharacters(in: .whitespacesAndNewlines)
+                let name = Self.storedTitle(for: url) ?? (seed?.isEmpty == false ? seed! : stemName)
+                return TableDocument(table: Table.loaded(from: parsed, name: name), fileURL: url)
             }
+        // Adopt any legacy seeds (and drop keys for files that no longer
+        // exist) so the next save can strip data-table-name for good.
+        syncTitleStore(with: docs)
+        return docs
     }
 
     func copyHTMLToClipboard() {

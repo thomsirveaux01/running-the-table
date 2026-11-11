@@ -1,10 +1,14 @@
 import SwiftUI
 
-/// Rename sheet: the table's title is its file stem, so there is a single
-/// field; committing moves the file and adopts whatever stem landed on disk.
+/// Rename sheet: the visible title and the .html filename are separate
+/// fields because a saved table's path is sticky (see saveAllDocuments) and
+/// the title is app-side metadata that never enters the HTML.
 struct RenameTablePrompt: View {
     @ObservedObject var viewModel: TableViewModel
 
+    private var trimmedTitle: String {
+        viewModel.renameTitleText.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
     private var trimmedFileName: String {
         viewModel.renameFileNameText.trimmingCharacters(in: .whitespacesAndNewlines)
     }
@@ -13,6 +17,9 @@ struct RenameTablePrompt: View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Rename Table")
                 .font(.headline)
+            TextField("Title", text: $viewModel.renameTitleText)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 280)
             HStack {
                 TextField("File name", text: $viewModel.renameFileNameText)
                     .textFieldStyle(.roundedBorder)
@@ -21,15 +28,15 @@ struct RenameTablePrompt: View {
                     .foregroundStyle(.secondary)
             }
             HStack {
+                Spacer()
                 Button("Cancel") { viewModel.cancelRename() }
                     .keyboardShortcut(.cancelAction)
-                Spacer()
                 Button("Rename") { viewModel.commitRename() }
                     .keyboardShortcut(.defaultAction)
-                    .disabled(trimmedFileName.isEmpty)
+                    .buttonStyle(.borderedProminent)
+                    .disabled(trimmedTitle.isEmpty || trimmedFileName.isEmpty)
             }
         }
-        .padding(20)
-        .frame(width: 320)
+        .padding(16)
     }
 }
