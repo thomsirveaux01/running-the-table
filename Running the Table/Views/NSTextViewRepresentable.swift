@@ -332,7 +332,9 @@ struct NSTextViewRepresentable: NSViewRepresentable {
         textView.isVerticallyResizable = true
         textView.autoresizingMask = [.width]
         textView.textContainer?.widthTracksTextView = true
+        context.coordinator.applyingProgrammaticContent = true
         textView.textStorage?.setAttributedString(content)
+        context.coordinator.applyingProgrammaticContent = false
         textView.setContentHuggingPriority(.defaultLow, for: .horizontal)
         textView.setContentHuggingPriority(.defaultLow, for: .vertical)
 
@@ -426,6 +428,9 @@ struct NSTextViewRepresentable: NSViewRepresentable {
         var lastAppliedRevision: Int?
         var lastFocused: Bool?
         private var revisionCancellable: AnyCancellable?
+        // AppKit echoes programmatic text/selection swaps back as delegate
+        // callbacks; publishing those would mutate the model mid-view-update.
+        var applyingProgrammaticContent = false
 
         init(parent: NSTextViewRepresentable) {
             self.parent = parent
@@ -445,6 +450,7 @@ struct NSTextViewRepresentable: NSViewRepresentable {
             lastAppliedRevision = revision
             guard !(textView.textStorage?.isEqual(to: content) ?? false) else { return }
             let savedSelection = textView.selectedRanges
+            applyingProgrammaticContent = true
             textView.textStorage?.setAttributedString(content)
             // NSSelectionArray rejects empty arrays (raises, crashes) and
             // out-of-range values, e.g. after undo empties a cell.
@@ -453,9 +459,11 @@ struct NSTextViewRepresentable: NSViewRepresentable {
                 selection = [NSValue(range: NSRange(location: content.length, length: 0))]
             }
             textView.selectedRanges = selection
+            applyingProgrammaticContent = false
         }
 
         func textDidChange(_ notification: Notification) {
+            guard !applyingProgrammaticContent else { return }
             guard let textView = notification.object as? NSTextView,
                   let storage = textView.textStorage else { return }
             parent.onTextChange(NSAttributedString(attributedString: storage))
@@ -463,6 +471,7 @@ struct NSTextViewRepresentable: NSViewRepresentable {
         }
 
         func textViewDidChangeSelection(_ notification: Notification) {
+            guard !applyingProgrammaticContent else { return }
             guard let textView = notification.object as? NSTextView else { return }
             parent.onSelectionChange(textView.selectedRange())
             if parent.highlightsCurrentLine { textView.needsDisplay = true }

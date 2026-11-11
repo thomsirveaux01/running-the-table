@@ -25,7 +25,9 @@ enum HTMLHighlighter {
         tokenPattern.enumerateMatches(in: text,
                                       range: NSRange(location: 0, length: ns.length)) { match, _, _ in
             guard let match else { return }
-            for group in groupColors.keys where match.range(at: group).location != NSNotFound {
+            // Sorted: Dictionary key order is hash-seed randomized per
+            // process, so unsorted iteration emitted runs in random order.
+            for group in groupColors.keys.sorted() where match.range(at: group).location != NSNotFound {
                 runs.append((match.range(at: group), groupColors[group]!))
             }
         }
