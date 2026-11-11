@@ -430,10 +430,6 @@ enum HTMLParser {
 
     // Content without a <table> tag is read as plain text: newlines make
     // rows, tabs make cells.
-    static func parse(_ html: String) -> [[TableCell]] {
-        parseTable(html).rows.map(\.cells)
-    }
-
     private static func parsePlainText(_ text: String) -> [[TableCell]] {
         let decoded = decodeEntities(stripTags(text))
         let lines = decoded.components(separatedBy: .newlines)

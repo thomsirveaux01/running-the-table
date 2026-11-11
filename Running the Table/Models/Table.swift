@@ -39,8 +39,6 @@ struct Table {
         Table(rows: [[TableCell()]])
     }
 
-    var rowCount: Int { rows.count }
-
     /// Visual column count: cells can cover several columns each, and a
     /// rowspan lets later rows cover fewer.
     var columnCount: Int {

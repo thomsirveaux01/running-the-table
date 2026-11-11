@@ -46,10 +46,6 @@ enum HTMLGenerator {
         return table.sourcePrefix + lines.joined(separator: "\n") + table.sourceSuffix
     }
 
-    static func html(forCell cell: TableCell) -> String {
-        cell.rawInnerHTML ?? attributedToHTML(cell.content)
-    }
-
     static func attributedToHTML(_ text: NSAttributedString) -> String {
         guard text.length > 0 else { return "" }
         var result = ""
