@@ -69,7 +69,10 @@ struct EditorView: View {
         }
 
         // Explicit spacer: without it the item merges into the next pill.
-        ToolbarSpacer(.fixed, placement: .automatic)
+        // Pre-26 targets lose the seam but stay functional (pills merge).
+        if #available(macOS 26.0, *) {
+            ToolbarSpacer(.fixed, placement: .automatic)
+        }
 
         // Toggles light up when the focused cell carries the attribute; their
         // chords live in the menus, which can print them.
@@ -101,7 +104,9 @@ struct EditorView: View {
             .help("Toggle header cell (Cmd+Shift+H)")
         }
 
-        ToolbarSpacer(.fixed, placement: .automatic)
+        if #available(macOS 26.0, *) {
+            ToolbarSpacer(.fixed, placement: .automatic)
+        }
 
         // Labels name the HTML tags they act on.
         ToolbarItemGroup(placement: .automatic) {

@@ -120,18 +120,9 @@ struct SidebarView: View {
                            })
                     .tag(document.id)
                     .opacity(swipedID == document.id ? 0.55 : 1)
-                    // Icon-only: a titled action is wider than the compact
-                    // sidebar can reveal, and SwiftUI then suppresses it entirely.
-                    .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-                        Button(role: .destructive) {
-                            viewModel.deleteDocument(document.id)
-                        } label: {
-                            Image(systemName: "trash")
-                        }
-                        .accessibilityLabel("Delete")
-                    } onPresentationChanged: { isRevealed in
-                        swipedID = isRevealed ? document.id : nil
-                    }
+                    .modifier(SwipeToDelete(
+                        onDelete: { viewModel.deleteDocument(document.id) },
+                        onRevealedChange: { swipedID = $0 ? document.id : nil }))
                     .contextMenu {
                         Button("Rename…") {
                             viewModel.beginRename(document.id)
@@ -159,6 +150,37 @@ struct SidebarView: View {
             viewModel.deleteDocument(id)
             return .handled
         }
+    }
+}
+
+// Swipe-to-delete. Dim-while-revealed needs the onPresentationChanged
+// overload (macOS 27+); older targets get the action without the dim.
+private struct SwipeToDelete: ViewModifier {
+    let onDelete: () -> Void
+    let onRevealedChange: (Bool) -> Void
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if #available(macOS 27.0, *) {
+            content.swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                deleteButton
+            } onPresentationChanged: { isRevealed in
+                onRevealedChange(isRevealed)
+            }
+        } else {
+            content.swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                deleteButton
+            }
+        }
+    }
+
+    // Icon-only: a titled action is wider than the compact sidebar can
+    // reveal, and SwiftUI then suppresses it entirely.
+    private var deleteButton: some View {
+        Button(role: .destructive, action: onDelete) {
+            Image(systemName: "trash")
+        }
+        .accessibilityLabel("Delete")
     }
 }
 
