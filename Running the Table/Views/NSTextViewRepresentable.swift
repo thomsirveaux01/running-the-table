@@ -2,9 +2,6 @@ import AppKit
 import Combine
 import SwiftUI
 
-// Focus is never forced from updateNSView — AppKit raises
-// NSInternalInconsistencyException for that; the subclass reports native
-// activation instead.
 /// Row/column edits a cell's context menu offers; the raw value rides along as
 /// the menu item's tag so one action method dispatches all four.
 enum CellCommand: Int {
@@ -16,6 +13,9 @@ private let cellCommandTitles: [(CellCommand, String)] = [
     (.addColumnLeft, "Add Column Left"), (.addColumnRight, "Add Column Right"),
 ]
 
+// Focus is never forced from updateNSView — AppKit raises
+// NSInternalInconsistencyException for that; the subclass reports native
+// activation instead.
 final class CellTextView: NSTextView {
     var didBecomeFirstResponderHandler: (() -> Void)?
     var flushPendingEditsHandler: (() -> Void)?

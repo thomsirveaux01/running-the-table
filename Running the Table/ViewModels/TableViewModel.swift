@@ -1609,7 +1609,8 @@ final class TableViewModel: ObservableObject {
 
     /// Creates a new table from the pasteboard — HTML table or tab/newline
     /// text — as one undoable step, the way Duplicate Table works.
-    func pasteAsNewTable() {        let pasteboard = NSPasteboard.general
+    func pasteAsNewTable() {
+        let pasteboard = NSPasteboard.general
         guard let source = pasteboard.string(forType: .html) ?? pasteboard.string(forType: .string),
               !source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         let parsed = HTMLParser.parseTable(source)

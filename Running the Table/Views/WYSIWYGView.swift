@@ -275,7 +275,7 @@ struct WYSIWYGView: View {
             RowResizeHandle(viewModel: viewModel, row: row)
                 .frame(width: gridColumnsWidth, height: Self.handleThickness)
                 .offset(x: gridLeftEdge, y: rowBoundaryY(row) - Self.handleThickness / 2)
-            }
+        }
     }
 
     // Accent fill marking the slot the dragged row rides in.

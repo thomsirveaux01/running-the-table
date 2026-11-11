@@ -40,8 +40,6 @@ struct EditorView: View {
 
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
-        // The leading region reserves a 53pt toggle slot that shifts when the
-        // sidebar collapses; the trailing region holds one x in both states.
         // Same button face in both states; it only gains the pull-down once a
         // template exists, so a fresh install keeps a plain one-click New.
         ToolbarItem(placement: .automatic) {
