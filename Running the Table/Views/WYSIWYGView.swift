@@ -76,7 +76,6 @@ struct WYSIWYGView: View {
         .padding(Self.divider)
         // The separator color shows through the 1pt spacing as grid lines.
         .background(Color(NSColor.separatorColor))
-        .overlay(alignment: .topLeading) { resizeHandles }
         .overlay(alignment: .topLeading) { gapHighlight }
         .overlay(alignment: .topLeading) { columnGapHighlight }
         .overlay(alignment: .topLeading) { selectionBorder }
@@ -128,6 +127,7 @@ struct WYSIWYGView: View {
                             y: isLifted(row) ? 3 : 0)
                 }
             }
+            resizeHandles
         }
         // topLeading: the ZStack's intrinsic size is only the largest cell
         // (offsets don't count in layout), so the default centering would
@@ -271,6 +271,8 @@ struct WYSIWYGView: View {
         Self.divider + Self.columnGutterHeight + Self.divider + captionBandHeight
     }
 
+    // Lives in the cell ZStack, not an overlay: the overlay's origin lands the
+    // handles off-grid, while the cells' origin is verified correct.
     @ViewBuilder
     private var resizeHandles: some View {
         ForEach(0..<max(viewModel.columnWidths.count - 1, 0), id: \.self) { column in
@@ -278,14 +280,18 @@ struct WYSIWYGView: View {
             if viewModel.canResizeBoundary(afterCol: column) {
                 ColumnResizeHandle(viewModel: viewModel, column: column)
                     .frame(width: Self.handleThickness, height: gridHeight)
-                    .offset(x: columnBoundaryX(column) - Self.handleThickness / 2,
-                            y: gridTopEdge)
+                    .offset(x: localColumnLeft(column) + columnWidth(column)
+                                + Self.divider / 2 - Self.handleThickness / 2,
+                            y: 0)
+                    .zIndex(2)
             }
         }
         ForEach(0..<max(viewModel.rowHeights.count - 1, 0), id: \.self) { row in
             RowResizeHandle(viewModel: viewModel, row: row)
                 .frame(width: gridColumnsWidth, height: Self.handleThickness)
-                .offset(x: gridLeftEdge, y: rowBoundaryY(row) - Self.handleThickness / 2)
+                .offset(x: 0, y: localRowTop(row) + rowHeight(row)
+                            + Self.divider / 2 - Self.handleThickness / 2)
+                .zIndex(2)
         }
     }
 
@@ -392,17 +398,6 @@ struct WYSIWYGView: View {
         return index
     }
 
-    private func columnBoundaryX(_ column: Int) -> CGFloat {
-        guard column < viewModel.columnWidths.count else { return 0 }
-        let widths = viewModel.columnWidths[0...column]
-        return gridLeftEdge + widths.reduce(0, +) + CGFloat(column) * Self.divider + Self.divider / 2
-    }
-
-    private func rowBoundaryY(_ row: Int) -> CGFloat {
-        guard row < viewModel.rowHeights.count else { return 0 }
-        let heights = viewModel.rowHeights[0...row]
-        return gridTopEdge + heights.reduce(0, +) + CGFloat(row) * Self.divider + Self.divider / 2
-    }
 }
 
 // One undo step per completed drag.
@@ -416,7 +411,9 @@ struct ColumnResizeHandle: View {
         Color.clear
             .contentShape(Rectangle())
             .gesture(
-                DragGesture(minimumDistance: 2)
+                // .global, not local: the handle moves as it resizes, so a local-space
+                // translation feeds that motion back into itself and jitters.
+                DragGesture(minimumDistance: 2, coordinateSpace: .global)
                     .onChanged { value in
                         if startWidth == nil {
                             startWidth = column < viewModel.columnWidths.count
@@ -452,7 +449,9 @@ struct RowResizeHandle: View {
         Color.clear
             .contentShape(Rectangle())
             .gesture(
-                DragGesture(minimumDistance: 2)
+                // .global, not local: the handle moves as it resizes, so a local-space
+                // translation feeds that motion back into itself and jitters.
+                DragGesture(minimumDistance: 2, coordinateSpace: .global)
                     .onChanged { value in
                         if startHeight == nil {
                             startHeight = row < viewModel.rowHeights.count
