@@ -347,12 +347,18 @@ struct SidebarRow: View {
 
     // The file's mtime stands in for "last edited": autosave rewrites it on
     // every change and steady-state launches never rewrite unchanged files.
+    // Fixed formatter: FormatStyle can't easily produce "MM/dd/yy, hh:mm a".
+    private static let modifiedFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "MM/dd/yy, hh:mm a"
+        return formatter
+    }()
+
     private var modifiedCaption: String {
         guard let url = viewModel.document(id: documentID)?.fileURL,
               let mtime = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
         else { return "Not saved yet" }
-        // "Nov 11, 2:14 PM" — the year and "at" push past the sidebar's width.
-        return "\(mtime.formatted(.dateTime.month(.abbreviated).day())), \(mtime.formatted(.dateTime.hour().minute()))"
+        return Self.modifiedFormatter.string(from: mtime)
     }
 
     var body: some View {
@@ -371,7 +377,7 @@ struct SidebarRow: View {
                     .onTapGesture(count: 2) { beginEdit() }
             }
             Text(modifiedCaption)
-                .font(.caption)
+                .font(.system(size: 11))
                 .foregroundStyle(.secondary)
         }
         .padding(.vertical, 2)
