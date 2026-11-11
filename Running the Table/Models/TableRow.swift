@@ -35,6 +35,8 @@ struct TableRow {
         self.section = section
     }
 
+    /// A row earns its <thead> by being nothing but header cells.
+    var allHeaders: Bool { !cells.isEmpty && cells.allSatisfy(\.isHeader) }
     func deepCopy() -> TableRow {
         var copy = self
         copy.cells = cells.map { $0.deepCopy() }

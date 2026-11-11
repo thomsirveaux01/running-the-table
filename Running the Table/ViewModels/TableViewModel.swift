@@ -486,9 +486,12 @@ final class TableViewModel: ObservableObject {
                 // the new cell in the new column even in rowspan-covered rows.
                 let insertAt = slots[row].first { $0.startCol >= boundary }?.cellIndex
                     ?? self.table.rows[row].count
-                self.table.rows[row].insert(TableCell(), at: insertAt)
+                // A row that is nothing but headers keeps its header-ness:
+                // the new cell joins as a <th> so <thead> survives the add.
+                self.table.rows[row].insert(TableCell(isHeader: self.table.rows[row].allHeaders), at: insertAt)
             }
             self.table.normalize()
+            self.demoteNonHeaderRows()
             self.ensureSizing()
             let col = min(boundary, max(self.table.rows[cell.row].count - 1, 0))
             self.focusedCell = GridCell(row: cell.row, column: col)
@@ -535,6 +538,9 @@ final class TableViewModel: ObservableObject {
             }
             if self.columnWidths.indices.contains(col) { self.columnWidths.remove(at: col) }
             self.table.normalize()
+            // The removal may leave a short row that normalize pads with a
+            // plain <td>, costing a header row its all-<th> status.
+            self.demoteNonHeaderRows()
             self.ensureSizing()
             self.keepFocusValid()
             self.flushToDocument()
@@ -645,6 +651,12 @@ final class TableViewModel: ObservableObject {
         guard let f = focusedCell, let c = cell(row: f.row, col: f.column) else { return }
         performUndoable(c.isHeader ? "Make Body Cell" : "Make Header Cell") {
             self.table.rows[f.row][f.column].isHeader.toggle()
+            // <thead> belongs to all-<th> rows: the last header cell leaving
+            // drops the row to the body, the first one back wins it again.
+            if self.table.rows[f.row].allHeaders, self.table.rows[f.row].section == .body {
+                self.table.rows[f.row].section = .head
+            }
+            self.demoteNonHeaderRows()
             self.flushToDocument()
             self.regenerateHTML()
         }
@@ -720,6 +732,9 @@ final class TableViewModel: ObservableObject {
             survivor.selectionRange = NSRange(location: 0, length: survivor.content.length)
             self.table.rows[top.row][top.cell] = survivor
             self.table.normalize()
+            // A merge can shorten a header row below full width; normalize's
+            // padding cell costs the row its all-<th> status and its <thead>.
+            self.demoteNonHeaderRows()
             self.ensureSizing()
             self.cellSelection = nil
             self.focusedCell = GridCell(row: top.row, column: top.cell)
@@ -752,15 +767,20 @@ final class TableViewModel: ObservableObject {
             cell.rowspan = 1
             cell.rawInnerHTML = nil
             self.table.rows[f.row][f.column] = cell
+            // Freed cells inherit the row's header status, so splitting a
+            // <th> yields <th>s and the row keeps its <thead>.
             for offset in 1..<p.colSpan {
-                self.table.rows[f.row].insert(TableCell(), at: f.column + offset)
+                self.table.rows[f.row].insert(TableCell(isHeader: self.table.rows[f.row].allHeaders),
+                                              at: f.column + offset)
             }
             for (row, at) in insertions {
                 for offset in 0..<p.colSpan {
-                    self.table.rows[row].insert(TableCell(), at: at + offset)
+                    self.table.rows[row].insert(TableCell(isHeader: self.table.rows[row].allHeaders),
+                                                at: at + offset)
                 }
             }
             self.table.normalize()
+            self.demoteNonHeaderRows()
             self.ensureSizing()
             self.flushToDocument()
             self.regenerateHTML()
@@ -789,6 +809,9 @@ final class TableViewModel: ObservableObject {
         table.captionRaw = nil
         flushToDocument()
         regenerateHTML()
+        // The HTML pane refreshes on revision ticks; without one the
+        // caption typing would land in the model but not on screen.
+        contentRevision += 1
         appendTypingChange(key: Self.captionKey, name: "Edit Caption", before: before)
     }
 
@@ -815,6 +838,15 @@ final class TableViewModel: ObservableObject {
             self.table.rows[f.row].section = section
             self.flushToDocument()
             self.regenerateHTML()
+        }
+    }
+
+    /// A row keeps <thead> only while it is nothing but header cells; a row
+    /// that gains a plain cell drops to the body. toggleHeader adds it back.
+    private func demoteNonHeaderRows() {
+        for row in table.rows.indices
+        where table.rows[row].section == .head && !table.rows[row].allHeaders {
+            table.rows[row].section = .body
         }
     }
 

@@ -52,33 +52,6 @@ struct RunningTheTableCommands: Commands {
             }
             .keyboardShortcut("Z", modifiers: [.command, .shift])
             .disabled(!viewModel.undoManager.canRedo)
-
-            // A second CommandGroup anchored on .undoRedo is dropped, so the
-            // table commands live in this one.
-            Divider()
-
-            Button("Duplicate Table") {
-                viewModel.duplicateSelectedDocument()
-            }
-            .keyboardShortcut("d")
-            .disabled(viewModel.selectedDocumentID == nil)
-
-            // Greyed while a text view owns the caret; the action also hands
-            // the chord back, because disabled items still swallow it.
-            Button("Delete Table") {
-                viewModel.deleteTableChordPressed()
-            }
-            .keyboardShortcut(.delete, modifiers: .command)
-            .disabled(viewModel.selectedDocumentID == nil || viewModel.isEditingText)
-
-            Divider()
-
-            Button("Manage Templates…") { viewModel.showTemplateManager = true }
-
-            Divider()
-
-            Button("Table Attributes…") { viewModel.beginTableAttributes() }
-                .disabled(viewModel.selectedDocumentID == nil)
         }
 
         // Apple Notes' table chord family (⌥⌘+arrows): the arrow names the
@@ -193,13 +166,36 @@ struct RunningTheTableCommands: Commands {
             }
         }
 
-        // Sits after the stock Paste group; ⌘V still pastes text into a
-        // cell, this turns the pasteboard into a whole new table.
+        // Rides after the stock Paste group: a second .pasteboard group is
+        // dropped, and leaving Undo/Redo alone keeps Cut/Copy/Paste under it.
         CommandGroup(after: .pasteboard) {
             Button("Paste as New Table") {
                 viewModel.pasteAsNewTable()
             }
             .keyboardShortcut("V", modifiers: [.command, .shift])
+
+            Divider()
+
+            Button("Duplicate Table") {
+                viewModel.duplicateSelectedDocument()
+            }
+            .keyboardShortcut("d")
+            .disabled(viewModel.selectedDocumentID == nil)
+
+            // Greyed while a text view owns the caret; the action also hands
+            // the chord back, because disabled items still swallow it.
+            Button("Delete Table") {
+                viewModel.deleteTableChordPressed()
+            }
+            .keyboardShortcut(.delete, modifiers: .command)
+            .disabled(viewModel.selectedDocumentID == nil || viewModel.isEditingText)
+
+            Divider()
+
+            Button("Manage Templates…") { viewModel.showTemplateManager = true }
+
+            Button("Table Attributes…") { viewModel.beginTableAttributes() }
+                .disabled(viewModel.selectedDocumentID == nil)
         }
     }
 
