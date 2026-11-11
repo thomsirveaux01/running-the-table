@@ -126,20 +126,6 @@ final class CellTextView: NSTextView {
         return accepted
     }
 
-    // DIAGNOSTIC: removed to test the "multiple persistent carets" report.
-    // A leftover selection keeps drawing as a gray highlight after the cell
-    // gives up focus; collapse it so clicking away clears it.
-    /*
-    override func resignFirstResponder() -> Bool {
-        let accepted = super.resignFirstResponder()
-        if accepted {
-            let loc = min(selectedRange().location, (string as NSString).length)
-            selectedRanges = [NSValue(range: NSRange(location: loc, length: 0))]
-        }
-        return accepted
-    }
-    */
-
     // IDE-style band behind the caret's line.
     override func drawBackground(in rect: NSRect) {
         super.drawBackground(in: rect)
@@ -489,6 +475,14 @@ struct NSTextViewRepresentable: NSViewRepresentable {
             guard let textView = notification.object as? NSTextView else { return }
             parent.onSelectionChange(textView.selectedRange())
             if parent.highlightsCurrentLine { textView.needsDisplay = true }
+        }
+
+        // Collapse the leftover selection when editing ends so it stops
+        // drawing gray; doing it in resignFirstResponder left stuck carets.
+        func textDidEndEditing(_ notification: Notification) {
+            guard let textView = notification.object as? NSTextView else { return }
+            let loc = min(textView.selectedRange().location, (textView.string as NSString).length)
+            textView.selectedRanges = [NSValue(range: NSRange(location: loc, length: 0))]
         }
 
         // Derived decoration only: layout-manager temporary attributes never
