@@ -74,6 +74,11 @@ struct RunningTheTableCommands: Commands {
             Divider()
 
             Button("Manage Templates…") { viewModel.showTemplateManager = true }
+
+            Divider()
+
+            Button("Table Attributes…") { viewModel.beginTableAttributes() }
+                .disabled(viewModel.selectedDocumentID == nil)
         }
 
         // Apple Notes' table chord family (⌥⌘+arrows): the arrow names the
@@ -116,6 +121,14 @@ struct RunningTheTableCommands: Commands {
             Button("Add Link…") { viewModel.beginLinkEntry() }
                 .keyboardShortcut("k")
                 .disabled(viewModel.focusedCell == nil)
+
+            Divider()
+
+            // Table-wide constructs that don't belong to one cell; the label
+            // mirrors whether a caption is currently shown.
+            Button(viewModel.hasCaption ? "Hide Caption" : "Show Caption") {
+                viewModel.toggleCaption()
+            }
         }
 
         // The formatting commands duplicate the toolbar buttons, but only a
@@ -178,18 +191,6 @@ struct RunningTheTableCommands: Commands {
                     .disabled(viewModel.focusedCell == nil)
                 }
             }
-        }
-
-        // Table-wide constructs that don't belong to one cell.
-        CommandMenu("Table") {
-            Button(viewModel.hasCaption ? "Hide Caption" : "Show Caption") {
-                viewModel.toggleCaption()
-            }
-
-            Divider()
-
-            Button("Table Attributes…") { viewModel.beginTableAttributes() }
-                .disabled(viewModel.selectedDocumentID == nil)
         }
 
         // Sits after the stock Paste group; ⌘V still pastes text into a
