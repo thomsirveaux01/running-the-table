@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 /// The app's whole menu-bar additions, in one Commands value so the
@@ -6,6 +7,13 @@ struct RunningTheTableCommands: Commands {
     @ObservedObject var viewModel: TableViewModel
 
     var body: some Commands {
+        // The stock About item, re-issued so the panel gets our credits block.
+        CommandGroup(replacing: .appInfo) {
+            Button("About Running the Table") {
+                NSApplication.shared.orderFrontStandardAboutPanel(options: [.credits: AboutPanel.credits])
+            }
+        }
+
         // ⌘N lands above the stock New Window (remapped to ⌥⌘N in App's
         // init); a replaced .newItem group would delete New Window, and an
         // id-carrying WindowGroup never opens its launch window.
@@ -208,5 +216,27 @@ struct RunningTheTableCommands: Commands {
     private func insertColumn(after: Bool) {
         guard let f = viewModel.focusedCell else { return }
         viewModel.addColumn(adjacentTo: f, after: after)
+    }
+}
+
+/// Credits block for the standard About panel, kept separate so probes can
+/// assert its payload without ordering the panel on screen.
+enum AboutPanel {
+    static let githubURLString = "https://github.com/thomsirveaux01/running-the-table"
+
+    // The link attribute makes "GitHub" clickable in the panel's text view.
+    static var credits: NSAttributedString {
+        let text = "By Andrew Cunningham\nVibe-coded locally with Qwen3.8-27B\nGitHub"
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.alignment = .center
+        let credits = NSMutableAttributedString(string: text, attributes: [
+            .font: NSFont.systemFont(ofSize: NSFont.smallSystemFontSize),
+            .paragraphStyle: paragraph,
+        ])
+        if let url = URL(string: githubURLString) {
+            let range = (text as NSString).range(of: "GitHub")
+            credits.addAttributes([.link: url, .foregroundColor: NSColor.linkColor], range: range)
+        }
+        return credits
     }
 }
