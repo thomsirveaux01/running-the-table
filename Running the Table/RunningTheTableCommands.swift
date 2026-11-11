@@ -5,12 +5,17 @@ import SwiftUI
 /// menu-reading probes can compile the identical commands into a test app.
 struct RunningTheTableCommands: Commands {
     @ObservedObject var viewModel: TableViewModel
+    // Defaulted so menu probes compile the identical commands unchanged.
+    @ObservedObject var updater: UpdateChecker = UpdateChecker()
 
     var body: some Commands {
         // The stock About item, re-issued so the panel gets our credits block.
         CommandGroup(replacing: .appInfo) {
             Button("About Running the Table") {
                 NSApplication.shared.orderFrontStandardAboutPanel(options: [.credits: AboutPanel.credits])
+            }
+            Button("Check for Updates…") {
+                Task { await updater.check(userInitiated: true) }
             }
         }
 

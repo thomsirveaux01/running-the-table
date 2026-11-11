@@ -1,32 +1,29 @@
 # Running the Table
 
-A macOS table editor for producing clean HTML tables for a web CMS: a
-WYSIWYG grid on top, a live-syncing HTML source pane below, and a
-Notes-style sidebar of saved tables.
+Lightweight macOS table editor for clean HTML tables. WYSIWYG grid on top, live HTML source pane below, Notes-style sidebar of saved tables.
+
+## Download
+
+[Latest release](https://github.com/thomsirveaux01/running-the-table/releases/latest). macOS 15.6+. Supports Apple Silicon and Intel. Signed and notarized.
 
 ## Features
 
-- WYSIWYG grid ⇄ HTML pane, bidirectional live sync
-- Bold, italic, and links (`Cmd+B` / `Cmd+I` / `Cmd+K`); `th`/`td` cells; colspan 1–6
-- Add/remove rows and columns; Google-Sheets-style drag to resize and reorder (gutter handles)
-- Spreadsheet keyboard navigation (Tab/Return/Escape)
-- One shared undo stack for typing, formatting, structure, and resizing
-- Notes-style autosave: tables live in `~/Documents/Running the Table/` as `.html`, no save panels
+- WYSIWYG grid ⇄ HTML pane with live two-way sync. 
+- WYSIWYG table-editing should be similar to most spreadsheet apps, with the ability to move rows and columns, copy/paste cells
+- WYSIWYG mode only supports basic table formatting (th, colspan, rowspan, a few others) but other tags typed manually in HTML mode will persist. 
+- Autosaves `.html` to `~/Documents/Running the Table/`, no save panels
+- HTML mode uses IDE-style colors, row numbering. 
+- Save any table as a template. 
+- Supports pasting existing HTML code directly into the HTML block.
+- Basic iCloud file syncing so data can sync between multiple Macs. Supports changing the default location of the save folder, for those who want to use something else.
 
 ## Building
 
-Requires Xcode 27 on macOS.
+Requires Xcode 27.
 
 ```
 xcodebuild -scheme "Running the Table" -configuration Debug build
 ```
-
-## Versioning
-
-Marketing version is 1.0 (`MARKETING_VERSION`
-in the target's build settings). `CURRENT_PROJECT_VERSION` is the build
-number and must be incremented on every commit that ships a build; releases
-are tagged `v<marketing version>`.
 
 ## Layout
 
@@ -35,6 +32,5 @@ Running the Table/
   Models/      Table, TableCell, TableDocument
   ViewModels/  TableViewModel — all app state, undo, autosave
   Views/       grid, cells, HTML pane, toolbar
-  Utils/       HTMLGenerator, HTMLParser
-APP_SPEC.md    design spec and platform-quirk notes
+  Utils/       HTMLGenerator, HTMLParser, HTMLHighlighter
 ```

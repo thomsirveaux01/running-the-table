@@ -1,7 +1,10 @@
+import AppKit
 import SwiftUI
 
 struct ContentView: View {
     @ObservedObject var viewModel: TableViewModel
+    // Defaulted so the offscreen probes keep compiling without owning one.
+    @ObservedObject var updater: UpdateChecker = UpdateChecker()
     // Custom toggle instead of the system one: SwiftUI parks the system toggle
     // behind a flexible space, so it slides on every collapse.
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
@@ -55,6 +58,52 @@ struct ContentView: View {
             TableAttributesSheet(viewModel: viewModel)
         }
         .frame(minWidth: 900, minHeight: 600)
+        .task { await updater.check(userInitiated: false) }
+        .alert(alertTitle, isPresented: promptShown, actions: { alertButtons }, message: {
+            Text(alertMessage)
+        })
+    }
+
+    // MARK: - Update prompt
+
+    private var promptShown: Binding<Bool> {
+        Binding(get: { updater.prompt != nil }, set: { if !$0 { updater.prompt = nil } })
+    }
+
+    private var alertTitle: String {
+        switch updater.prompt {
+        case .available: "Update Available"
+        case .upToDate: "You’re Up to Date"
+        case .checkFailed: "Update Check Failed"
+        case nil: ""
+        }
+    }
+
+    private var alertMessage: String {
+        switch updater.prompt {
+        case let .available(version, _):
+            "Running the Table \(version) is available — you have \(updater.currentVersion)."
+        case .upToDate:
+            "Version \(updater.currentVersion) is the latest release."
+        case .checkFailed:
+            // Deliberately vague: fires for dead networks, rate limits, and a
+            // 404 (no GitHub Release published yet) alike — only "unreachable"
+            // would be wrong for the latter two.
+            "Couldn't check for updates. Try again later."
+        case nil:
+            ""
+        }
+    }
+
+    @ViewBuilder
+    private var alertButtons: some View {
+        if case let .available(_, url) = updater.prompt {
+            Button("Download") { NSWorkspace.shared.open(url) }
+            Button("Skip This Version") { updater.skipPromptedVersion() }
+            Button("Later", role: .cancel) {}
+        } else {
+            Button("OK", role: .cancel) {}
+        }
     }
 
     private var emptyState: some View {

@@ -2,6 +2,7 @@ import SwiftUI
 
 @main struct RunningTheTable: App {
     @StateObject private var viewModel = TableViewModel()
+    @StateObject private var updater = UpdateChecker()
 
     // The flag is static and read when a window orders on screen, so it has to
     // go before WindowGroup builds anything.
@@ -15,10 +16,10 @@ import SwiftUI
 
     var body: some Scene {
         WindowGroup {
-            ContentView(viewModel: viewModel)
+            ContentView(viewModel: viewModel, updater: updater)
         }
         .commands {
-            RunningTheTableCommands(viewModel: viewModel)
+            RunningTheTableCommands(viewModel: viewModel, updater: updater)
         }
     }
 }
