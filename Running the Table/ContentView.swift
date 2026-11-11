@@ -116,7 +116,10 @@ struct SidebarView: View {
                            isEditing: editingID == document.id,
                            beginEdit: { editingID = document.id },
                            endEdit: {
-                               if editingID == document.id { editingID = nil }
+                               if editingID == document.id {
+                                   editingID = nil
+                                   viewModel.commitInlineRename(document.id)
+                               }
                            })
                     .tag(document.id)
                     .opacity(swipedID == document.id ? 0.55 : 1)

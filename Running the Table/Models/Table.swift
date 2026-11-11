@@ -10,7 +10,7 @@ struct Table {
     var caption: NSAttributedString?
     /// Verbatim caption interior while unedited (wins over `caption`).
     var captionRaw: String?
-    /// Parsed table-level attributes minus data-table-name, in author order.
+    /// Table-level attributes in author order, minus any this app owns.
     var attributes: [HTMLAttribute] = []
     /// Verbatim <colgroup>/<col> blocks, emitted before the rows.
     var columnMarkup: [String] = []

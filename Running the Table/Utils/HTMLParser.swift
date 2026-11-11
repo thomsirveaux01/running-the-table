@@ -21,16 +21,7 @@ enum HTMLParser {
     private static let tagPattern = try! NSRegularExpression(pattern: "(?is)<(/?)([a-zA-Z][a-zA-Z0-9]*)([^>]*)>")
     private static let anyTagPattern = try! NSRegularExpression(pattern: "(?is)<[^>]*>")
     private static let hrefPattern = try! NSRegularExpression(pattern: "(?i)href\\s*=\\s*(?:\"([^\"]*)\"|'([^']*)'|([^\\s>]+))")
-    private static let tableNamePattern = try! NSRegularExpression(pattern: "(?i)<table\\b[^>]*\\bdata-table-name\\s*=\\s*\"([^\"]*)\"")
     private static let entityPattern = try! NSRegularExpression(pattern: "&(#x[0-9a-fA-F]+|#[0-9]+|[a-zA-Z][a-zA-Z0-9]*);")
-
-    /// The title stored in the HTML; nil means fall back to the file stem.
-    static func tableName(in html: String) -> String? {
-        guard let m = tableNamePattern.firstMatch(in: html, range: NSRange(html.startIndex..., in: html)),
-              let r = Range(m.range(at: 1), in: html) else { return nil }
-        let name = decodeEntities(String(html[r]))
-        return name.isEmpty ? nil : name
-    }
 
     // MARK: - Tokens
 
@@ -131,8 +122,7 @@ enum HTMLParser {
     }
 
     /// Attributes with their source ranges, so the model can strip the ones
-    /// it owns (colspan, rowspan, data-table-name) and re-emit the rest
-    /// verbatim.
+    /// it owns (colspan, rowspan) and re-emit the rest verbatim.
     private static func attributes(in text: String) -> [(pair: HTMLAttribute, range: NSRange)] {
         let ns = text as NSString
         let end = ns.length
@@ -213,6 +203,8 @@ enum HTMLParser {
         var p = ParsedTable()
         p.sourcePrefix = ns.substring(to: tokens[open].range.location)
         p.attributes = attributes(in: tokens[open].attributeText).map(\.pair)
+            // Legacy saves carried the title here; drop it so it never
+            // resurfaces as a user-editable attribute.
             .filter { $0.name != "data-table-name" }
 
         var i = open + 1

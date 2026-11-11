@@ -81,7 +81,6 @@ final class TableViewModel: ObservableObject {
     @Published var templateNameText = ""
     @Published var showTemplateManager = false
     @Published var showRenamePrompt = false
-    @Published var renameTitleText = ""
     @Published var renameFileNameText = ""
     /// Notes on dropped or unclosed markup in the latest source-pane parse;
     /// empty whenever the grid generated the HTML.
@@ -825,8 +824,8 @@ final class TableViewModel: ObservableObject {
 
     func beginTableAttributes() {
         flushToDocument()
-        // The title has its own dialog; the sheet owns everything else.
-        attributesDraft = table.attributes.filter { $0.name != "data-table-name" }
+        // The title is the file name; the sheet owns all table attributes.
+        attributesDraft = table.attributes
         showTableAttributes = true
     }
 
@@ -845,6 +844,8 @@ final class TableViewModel: ObservableObject {
         var cleaned: [HTMLAttribute] = []
         for attribute in attributesDraft {
             let name = attribute.name.trimmingCharacters(in: .whitespaces).lowercased()
+            // Titles live in file names; a hand-typed legacy attribute is
+            // dropped rather than re-emitted.
             guard !name.isEmpty, name != "data-table-name" else { continue }
             if let existing = cleaned.firstIndex(where: { $0.name == name }) {
                 cleaned[existing].value = attribute.value
@@ -852,7 +853,7 @@ final class TableViewModel: ObservableObject {
                 cleaned.append(HTMLAttribute(name: name, value: attribute.value))
             }
         }
-        guard cleaned != table.attributes.filter({ $0.name != "data-table-name" }) else { return }
+        guard cleaned != table.attributes else { return }
         performUndoable("Edit Table Attributes") {
             self.table.attributes = cleaned
             self.flushToDocument()
@@ -991,12 +992,11 @@ final class TableViewModel: ObservableObject {
         }
     }
 
-    /// Opens the rename sheet pre-filled with the title and the file stem; an
+    /// Opens the rename sheet pre-filled with the current file stem; an
     /// unsaved table proposes a stem from its title. Nil means the selection.
     func beginRename(_ id: UUID? = nil) {
         guard let id = id ?? selectedDocumentID, let doc = document(id: id) else { return }
         renamingID = id
-        renameTitleText = doc.name
         renameFileNameText = doc.fileURL?.deletingPathExtension().lastPathComponent
             ?? Self.sanitizedFileName(doc.name)
         showRenamePrompt = true
@@ -1004,14 +1004,35 @@ final class TableViewModel: ObservableObject {
 
     func cancelRename() { showRenamePrompt = false }
 
-    /// Title and filename are set independently here; an inline rename only
-    /// touches the title, because a saved table's path is sticky.
     func commitRename() {
         showRenamePrompt = false
-        guard let id = renamingID, let idx = documents.firstIndex(where: { $0.id == id }) else { return }
-        let title = renameTitleText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let id = renamingID else { return }
         let fileName = renameFileNameText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !title.isEmpty, !fileName.isEmpty else { return }
+        guard !fileName.isEmpty else { return }
+        applyRename(id: id, fileName: fileName)
+    }
+
+    /// The sidebar field retitles per keystroke; this moves the file to
+    /// match when editing ends. Unsaved tables have no file to move yet
+    /// (autosave derives the name from the title on first save), and a
+    /// blanked field (already folded to "Untitled Table") reverts to the
+    /// on-disk stem instead of clobbering the file.
+    func commitInlineRename(_ id: UUID) {
+        guard let idx = documents.firstIndex(where: { $0.id == id }) else { return }
+        guard let stem = documents[idx].fileURL?.deletingPathExtension().lastPathComponent else { return }
+        if documents[idx].name == "Untitled Table", stem != "Untitled Table" {
+            documents[idx].name = stem
+            if id == selectedDocumentID { table.name = stem }
+            return
+        }
+        guard documents[idx].name != stem else { return }
+        applyRename(id: id, fileName: documents[idx].name)
+    }
+
+    /// Moves the document's file and retitles the document to the stem that
+    /// actually landed on disk — title and file stem are one and the same.
+    private func applyRename(id: UUID, fileName: String) {
+        guard let idx = documents.firstIndex(where: { $0.id == id }) else { return }
         closeTypingGroup()
         flushToDocument()
 
@@ -1032,13 +1053,14 @@ final class TableViewModel: ObservableObject {
         if let oldURL, oldURL != newURL {
             try? FileManager.default.moveItem(at: oldURL, to: newURL)
         }
-        documents[idx].name = title
+        let landed = newURL.deletingPathExtension().lastPathComponent
+        documents[idx].name = landed
         documents[idx].fileURL = newURL
         if id == selectedDocumentID {
-            table.name = title
+            table.name = landed
         }
-        // Persist now: the title lives in the file's data-table-name, and a
-        // rename with no further edits must not wait for the next autosave.
+        // Persist now: a rename with no further edits must not wait for the
+        // next autosave.
         saveAllDocuments()
 
         let afterDocuments = deepCopied(documents)
@@ -1463,10 +1485,7 @@ final class TableViewModel: ObservableObject {
                 let rawName = url.deletingPathExtension().lastPathComponent
                 // Legacy saves were named "----.html" (the old broken
                 // sanitizer); surface those as "Untitled Table".
-                let stemName = Self.sanitizedFileName(rawName) == "Untitled Table" ? "Untitled Table" : rawName
-                // The in-file title wins: the rename dialog lets it differ
-                // from the filename, and only the file keeps both.
-                let name = HTMLParser.tableName(in: html) ?? stemName
+                let name = Self.sanitizedFileName(rawName) == "Untitled Table" ? "Untitled Table" : rawName
                 let table = Table.loaded(from: HTMLParser.parseTable(html), name: name)
                 return TableDocument(table: table, fileURL: url)
             }

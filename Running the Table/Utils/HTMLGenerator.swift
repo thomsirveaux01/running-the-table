@@ -3,14 +3,12 @@ import AppKit
 enum HTMLGenerator {
     static func html(for table: Table) -> String {
         var attrs = ""
-        for attribute in table.attributes where attribute.name != "data-table-name" {
+        for attribute in table.attributes {
             attrs += " \(attribute.name)=\"\(escapeAttribute(attribute.value))\""
         }
-        // The title rides in a data attribute so a title that differs from the
-        // filename survives a relaunch; renderers ignore it, and only
-        // loadStoredDocuments reads it back.
-        let name = table.name.isEmpty ? "" : " data-table-name=\"\(escapeAttribute(table.name))\""
-        var lines: [String] = ["<table\(attrs)\(name)>"]
+        // The title is the file stem; nothing identifying is written into the
+        // HTML itself.
+        var lines: [String] = ["<table\(attrs)>"]
         if let caption = table.caption {
             lines.append("  <caption>\(table.captionRaw ?? attributedToHTML(caption))</caption>")
         }
