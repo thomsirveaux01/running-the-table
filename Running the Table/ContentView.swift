@@ -59,9 +59,17 @@ struct ContentView: View {
         }
         .frame(minWidth: 900, minHeight: 600)
         .task { await updater.check(userInitiated: false) }
-        .alert(alertTitle, isPresented: promptShown, actions: { alertButtons }, message: {
+        .alert(alertTitle, isPresented: statusShown, actions: { alertButtons }, message: {
             Text(alertMessage)
         })
+        .sheet(isPresented: updateShown) {
+            if case let .available(version, notes) = updater.prompt {
+                UpdatePromptView(version: version, notes: notes,
+                                 onDownload: { Task { await updater.downloadPromptedUpdate() } },
+                                 onSkip: { updater.skipPromptedVersion() },
+                                 onLater: { updater.prompt = nil })
+            }
+        }
         .alert("Lost Access to Your Tables", isPresented: lostAccessShown) {
             Button("Choose Folder…") { library.regrantAfterLoss() }
             Button("Use Container", role: .cancel) { library.useContainerFallback() }
@@ -139,13 +147,25 @@ struct ContentView: View {
 
     // MARK: - Update prompt
 
-    private var promptShown: Binding<Bool> {
-        Binding(get: { updater.prompt != nil }, set: { if !$0 { updater.prompt = nil } })
+    // The two status popups ride the stock alert; the available-prompt is a
+    // sheet because alerts cannot scroll long release notes.
+    private var statusShown: Binding<Bool> {
+        Binding(get: {
+            if case .available = updater.prompt { return false }
+            return updater.prompt != nil
+        }, set: { if !$0 { updater.prompt = nil } })
+    }
+
+    private var updateShown: Binding<Bool> {
+        Binding(get: {
+            if case .available = updater.prompt { return true }
+            return false
+        }, set: { if !$0 { updater.prompt = nil } })
     }
 
     private var alertTitle: String {
         switch updater.prompt {
-        case .available: "Update Available"
+        case .available: ""
         case .upToDate: "You’re Up to Date"
         case .checkFailed: "Update Check Failed"
         case nil: ""
@@ -154,28 +174,22 @@ struct ContentView: View {
 
     private var alertMessage: String {
         switch updater.prompt {
-        case let .available(version, _):
-            "Running the Table \(version) is available — you have \(updater.currentVersion)."
+        case .available:
+            return ""
         case .upToDate:
-            "Version \(updater.currentVersion) is the latest release."
+            return "Version \(updater.currentVersion) is the latest release."
         case .checkFailed:
             // Vague on purpose: covers dead networks, rate limits, and a 404
             // (no release published yet) alike.
-            "Couldn't check for updates. Try again later."
+            return "Couldn't check for updates. Try again later."
         case nil:
-            ""
+            return ""
         }
     }
 
     @ViewBuilder
     private var alertButtons: some View {
-        if case let .available(_, url) = updater.prompt {
-            Button("Download") { NSWorkspace.shared.open(url) }
-            Button("Skip This Version") { updater.skipPromptedVersion() }
-            Button("Later", role: .cancel) {}
-        } else {
-            Button("OK", role: .cancel) {}
-        }
+        Button("OK", role: .cancel) {}
     }
 
     private var emptyState: some View {
@@ -349,6 +363,58 @@ struct SidebarRow: View {
         .onChange(of: nameFieldFocused) { _, focused in
             if !focused { endEdit() }
         }
+    }
+}
+
+/// Update-available sheet: one-line announcement, bulleted release notes
+/// capped at a scrollable height so a long list cannot break the window,
+/// then the actions (Download is the default button).
+struct UpdatePromptView: View {
+    let version: String
+    let notes: String
+    var onDownload: () -> Void
+    var onSkip: () -> Void
+    var onLater: () -> Void
+
+    // GitHub note bodies are markdown bullets; the dialog renders real ones.
+    // Internal so updateprompt_probe can pin the parsing.
+    var bullets: [String] {
+        notes.split(separator: "\n")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+            .map { $0.hasPrefix("- ") ? String($0.dropFirst(2)) : $0 }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Version \(version) is available!")
+                .font(.headline)
+            if !bullets.isEmpty {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 6) {
+                        ForEach(bullets, id: \.self) { line in
+                            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                                Text("•").foregroundStyle(.secondary)
+                                Text(line)
+                            }
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .frame(maxHeight: 220)
+            }
+            HStack {
+                Spacer()
+                Button("Later", action: onLater)
+                    .keyboardShortcut(.cancelAction)
+                Button("Skip This Version", action: onSkip)
+                Button("Download", action: onDownload)
+                    .keyboardShortcut(.defaultAction)
+                    .buttonStyle(.borderedProminent)
+            }
+        }
+        .padding(16)
+        .frame(width: 420)
     }
 }
 
