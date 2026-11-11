@@ -126,8 +126,10 @@ final class CellTextView: NSTextView {
         return accepted
     }
 
+    // DIAGNOSTIC: removed to test the "multiple persistent carets" report.
     // A leftover selection keeps drawing as a gray highlight after the cell
     // gives up focus; collapse it so clicking away clears it.
+    /*
     override func resignFirstResponder() -> Bool {
         let accepted = super.resignFirstResponder()
         if accepted {
@@ -136,6 +138,7 @@ final class CellTextView: NSTextView {
         }
         return accepted
     }
+    */
 
     // IDE-style band behind the caret's line.
     override func drawBackground(in rect: NSRect) {
