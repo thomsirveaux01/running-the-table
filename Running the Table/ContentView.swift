@@ -268,11 +268,13 @@ struct SidebarView: View {
                         let targetIDs = viewModel.sidebarSelection.contains(document.id)
                             ? viewModel.sidebarSelection
                             : [document.id]
-                        Button("Rename…") {
-                            viewModel.beginRename(document.id)
-                        }
-                        Button("Save as Template…") {
-                            viewModel.beginTemplateSave(from: document.id)
+                        if viewModel.selectedDocumentIDs.count == 1 {
+                            Button("Rename…") {
+                                viewModel.beginRename(document.id)
+                            }
+                            Button("Save as Template…") {
+                                viewModel.beginTemplateSave(from: document.id)
+                            }
                         }
                         Button("Duplicate") {
                             viewModel.duplicateDocuments(targetIDs)
