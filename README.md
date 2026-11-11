@@ -23,7 +23,7 @@ xcodebuild -scheme "Running the Table" -configuration Debug build
 
 ## Versioning
 
-Marketing version stays below 1.0 until the first release (`MARKETING_VERSION`
+Marketing version is 1.0 (`MARKETING_VERSION`
 in the target's build settings). `CURRENT_PROJECT_VERSION` is the build
 number and must be incremented on every commit that ships a build; releases
 are tagged `v<marketing version>`.
