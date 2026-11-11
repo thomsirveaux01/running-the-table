@@ -1506,8 +1506,14 @@ final class TableViewModel: ObservableObject {
     /// change, which keeps undo, deletes, and orphaned files honest.
     private static let titlesByPathKey = "TableTitlesByPath"
 
+    // contentsOfDirectory reports symlinked paths resolved (/tmp → /private/tmp),
+    // so both sides of the store must key on the canonical path or lookups miss.
+    private static func canonicalPath(_ url: URL) -> String {
+        url.resolvingSymlinksInPath().path
+    }
+
     private static func storedTitle(for url: URL) -> String? {
-        (UserDefaults.standard.dictionary(forKey: titlesByPathKey) as? [String: String])?[url.path]
+        (UserDefaults.standard.dictionary(forKey: titlesByPathKey) as? [String: String])?[canonicalPath(url)]
     }
 
     private static func syncTitleStore(with docs: [TableDocument]) {
@@ -1515,7 +1521,7 @@ final class TableViewModel: ObservableObject {
         for doc in docs {
             guard let url = doc.fileURL else { continue }
             let stem = url.deletingPathExtension().lastPathComponent
-            if doc.name != stem { map[url.path] = doc.name }
+            if doc.name != stem { map[canonicalPath(url)] = doc.name }
         }
         UserDefaults.standard.set(map, forKey: titlesByPathKey)
     }
