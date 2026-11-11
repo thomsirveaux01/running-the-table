@@ -223,10 +223,15 @@ final class LibraryCoordinator: ObservableObject {
     func launchOnce() {
         guard !promptedThisLaunch else { return }
         promptedThisLaunch = true
-        if LibraryLocation.defaults.data(forKey: LibraryLocation.bookmarkKey) != nil,
-           LibraryLocation.resolveGrant() == nil {
+        guard LibraryLocation.defaults.data(forKey: LibraryLocation.bookmarkKey) != nil else { return }
+        if LibraryLocation.resolveGrant() == nil {
             let path = LibraryLocation.defaults.string(forKey: LibraryLocation.grantedPathKey) ?? "your tables folder"
             step = .lostAccess(path: path)
+        } else {
+            // The VM loaded at init, before this grant resolved; without this
+            // reload the sidebar stays on the container for the whole session.
+            refreshPath()
+            viewModel?.reloadFromDisk()
         }
     }
 
