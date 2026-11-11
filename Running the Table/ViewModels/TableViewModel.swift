@@ -137,6 +137,25 @@ final class TableViewModel: ObservableObject {
         saveAllDocuments()
     }
 
+    /// Re-read tables and templates after the library root moves underneath
+    /// the running app (grant, import, folder change, container fallback).
+    func reloadFromDisk() {
+        flushToDocument()
+        documents = Self.loadStoredDocuments()
+        templates = Self.loadStoredTemplates()
+        selectedDocumentID = nil
+        table = Table.new()
+        focusedCell = nil
+        ensureSizing()
+        regenerateHTML()
+        savedHTML.removeAll()
+        for doc in documents {
+            if let url = doc.fileURL, let html = try? String(contentsOf: url, encoding: .utf8) {
+                savedHTML[doc.id] = html
+            }
+        }
+    }
+
     // Shared stack: cells and the HTML pane return this from their
     // undoManager override, so every edit shares one history.
     let undoManager = UndoManager()
@@ -1516,6 +1535,19 @@ final class TableViewModel: ObservableObject {
         (UserDefaults.standard.dictionary(forKey: titlesByPathKey) as? [String: String])?[canonicalPath(url)]
     }
 
+    /// Rewrite store keys when the library root moves so titles survive the move.
+    static func rekeyTitles(from oldRoot: URL, to newRoot: URL) {
+        let o = canonicalPath(oldRoot), n = canonicalPath(newRoot)
+        guard o != n,
+              let map = UserDefaults.standard.dictionary(forKey: titlesByPathKey) as? [String: String] else { return }
+        var rebuilt: [String: String] = [:]
+        for (key, value) in map {
+            if key == o || key.hasPrefix(o + "/") { rebuilt[n + key.dropFirst(o.count)] = value }
+            else { rebuilt[key] = value }
+        }
+        UserDefaults.standard.set(rebuilt, forKey: titlesByPathKey)
+    }
+
     private static func syncTitleStore(with docs: [TableDocument]) {
         var map: [String: String] = [:]
         for doc in docs {
@@ -1716,8 +1748,6 @@ final class TableViewModel: ObservableObject {
 
     static var saveDirectory: URL {
         if let override = saveDirectoryOverride { return override }
-        let base = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
-            ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Documents")
-        return base.appendingPathComponent("Running the Table", isDirectory: true)
+        return LibraryLocation.directory
     }
 }

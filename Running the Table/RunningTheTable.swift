@@ -3,6 +3,7 @@ import SwiftUI
 @main struct RunningTheTable: App {
     @StateObject private var viewModel = TableViewModel()
     @StateObject private var updater = UpdateChecker()
+    @StateObject private var library = LibraryCoordinator()
 
     // The flag is static and read when a window orders on screen, so it has to
     // go before WindowGroup builds anything.
@@ -16,10 +17,20 @@ import SwiftUI
 
     var body: some Scene {
         WindowGroup {
-            ContentView(viewModel: viewModel, updater: updater)
+            ContentView(viewModel: viewModel, updater: updater, library: library)
+                // The grant flow lives here, not in ContentView, so offscreen
+                // probes hosting ContentView never raise the panel.
+                .task {
+                    library.viewModel = viewModel
+                    library.launchOnce()
+                }
         }
         .commands {
             RunningTheTableCommands(viewModel: viewModel, updater: updater)
+        }
+
+        Settings {
+            LibrarySettingsView(library: library)
         }
     }
 }

@@ -5,6 +5,7 @@ struct ContentView: View {
     @ObservedObject var viewModel: TableViewModel
     // Defaulted so the offscreen probes keep compiling without owning one.
     @ObservedObject var updater: UpdateChecker = UpdateChecker()
+    @ObservedObject var library: LibraryCoordinator = LibraryCoordinator()
     // Custom toggle instead of the system one: SwiftUI parks the system toggle
     // behind a flexible space, so it slides on every collapse.
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
@@ -62,6 +63,95 @@ struct ContentView: View {
         .alert(alertTitle, isPresented: promptShown, actions: { alertButtons }, message: {
             Text(alertMessage)
         })
+        // Library-folder prompts (grant flow lives in the App scene).
+        .alert("Lost Access to Your Tables", isPresented: lostAccessShown) {
+            Button("Choose Folder…") { library.regrantAfterLoss() }
+            Button("Use Container", role: .cancel) { library.useContainerFallback() }
+        } message: {
+            Text("The app can no longer reach \(lostPath). Re-select it to keep your tables there, or fall back to the app's container.")
+        }
+        .sheet(isPresented: importShown) {
+            libraryChoiceSheet(title: "Import Your Existing Tables?",
+                               body: "Copy \(importCount) table(s) from the app's container into \(importTo.path)? The originals stay as a backup.",
+                               confirm: "Import",
+                               onConfirm: { library.performImport() },
+                               onCancel: { library.declineImport() })
+        }
+        .sheet(isPresented: moveShown) {
+            libraryChoiceSheet(title: "Move Your Tables?",
+                               body: "Move \(moveCount) table(s) from \(moveFrom.path) to \(moveTo.path)? Copy keeps the originals in place.",
+                               confirm: "Move",
+                               onConfirm: { library.resolveMove(copy: false) },
+                               onCancel: { library.cancelMove() },
+                               extra: ("Copy", { library.resolveMove(copy: true) }))
+        }
+        .alert("Couldn't Finish", isPresented: failureShown) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(library.failure ?? "")
+        }
+    }
+
+    // MARK: - Library prompts
+
+    private var lostAccessShown: Binding<Bool> {
+        Binding(get: { if case .lostAccess = library.step { return true }; return false },
+                set: { if !$0 { library.step = .none } })
+    }
+    private var lostPath: String {
+        if case let .lostAccess(path) = library.step { return path }
+        return ""
+    }
+
+    private var importShown: Binding<Bool> {
+        Binding(get: { if case .importOffer = library.step { return true }; return false }, set: { _ in })
+    }
+    private var importCount: Int {
+        if case let .importOffer(count, _, _) = library.step { return count }; return 0
+    }
+    private var importTo: URL {
+        if case let .importOffer(_, _, to) = library.step { return to }
+        return LibraryLocation.directory
+    }
+
+    private var moveShown: Binding<Bool> {
+        Binding(get: { if case .moveOffer = library.step { return true }; return false }, set: { _ in })
+    }
+    private var moveCount: Int {
+        if case let .moveOffer(count, _, _) = library.step { return count }; return 0
+    }
+    private var moveFrom: URL {
+        if case let .moveOffer(_, from, _) = library.step { return from }; return LibraryLocation.directory
+    }
+    private var moveTo: URL {
+        if case let .moveOffer(_, _, to) = library.step { return to }; return LibraryLocation.directory
+    }
+
+    private var failureShown: Binding<Bool> {
+        Binding(get: { library.failure != nil }, set: { if !$0 { library.failure = nil } })
+    }
+
+    @ViewBuilder
+    private func libraryChoiceSheet(title: String, body text: String, confirm: String,
+                                    onConfirm: @escaping () -> Void,
+                                    onCancel: @escaping () -> Void,
+                                    extra: (String, () -> Void)? = nil) -> some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text(title).font(.headline)
+            Text(text).font(.body).foregroundStyle(.secondary)
+            HStack {
+                Spacer()
+                Button("Cancel", role: .cancel, action: onCancel)
+                if let extra {
+                    Button(extra.0, action: extra.1)
+                }
+                Button(confirm) { onConfirm() }
+                    .buttonStyle(.borderedProminent)
+                    .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(20)
+        .frame(width: 460)
     }
 
     // MARK: - Update prompt

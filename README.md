@@ -11,7 +11,7 @@ Lightweight macOS table editor for clean HTML tables. WYSIWYG grid on top, live 
 - WYSIWYG grid ⇄ HTML pane with live two-way sync. 
 - WYSIWYG table-editing should be similar to most spreadsheet apps, with the ability to move rows and columns, copy/paste cells
 - WYSIWYG mode only supports basic table formatting (th, colspan, rowspan, a few others) but other tags typed manually in HTML mode will persist. 
-- Autosaves `.html` to `~/Documents/Running the Table/`, no save panels
+- Picks its folder once (defaults to `~/Documents/Running the Table`), then autosaves `.html` there — no save panels
 - HTML mode uses IDE-style colors, row numbering. 
 - Save any table as a template. 
 - Supports pasting existing HTML code directly into the HTML block.
