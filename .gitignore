@@ -11,3 +11,11 @@ DerivedData/
 build/
 *.dSYM
 *.dSYM.zip
+
+# Local agent working files — only the app itself belongs on GitHub.
+AGENTS.md
+HANDOFF.md
+APP_SPEC.md
+APP_STORE.md
+.opencode/
+.mobilebuildmcp/
