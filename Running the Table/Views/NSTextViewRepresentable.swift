@@ -126,6 +126,17 @@ final class CellTextView: NSTextView {
         return accepted
     }
 
+    // A leftover selection keeps drawing as a gray highlight after the cell
+    // gives up focus; collapse it so clicking away clears it.
+    override func resignFirstResponder() -> Bool {
+        let accepted = super.resignFirstResponder()
+        if accepted {
+            let loc = min(selectedRange().location, (string as NSString).length)
+            selectedRanges = [NSValue(range: NSRange(location: loc, length: 0))]
+        }
+        return accepted
+    }
+
     // IDE-style band behind the caret's line.
     override func drawBackground(in rect: NSRect) {
         super.drawBackground(in: rect)

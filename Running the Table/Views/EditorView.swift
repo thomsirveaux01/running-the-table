@@ -31,8 +31,9 @@ struct EditorView: View {
         VSplitView {
             WYSIWYGView(viewModel: viewModel)
                 .frame(minHeight: 200, maxHeight: .infinity)
+                .background(InitialSplitSetter(fraction: 2.0 / 3.0))
             HTMLView(viewModel: viewModel)
-                .frame(minHeight: 140, idealHeight: 260, maxHeight: .infinity)
+                .frame(minHeight: 140, maxHeight: .infinity)
         }
         .toolbar { toolbarContent }
         .sheet(isPresented: $viewModel.showLinkPrompt) { linkSheet }
@@ -172,5 +173,50 @@ struct EditorView: View {
             }
         }
         .padding(16)
+    }
+}
+
+/// VSplitView has no initial-position API and always opens 50/50 (measured:
+/// pane idealHeights are ignored), so the first layout nudges the underlying
+/// NSSplitView's divider to the wanted fraction. Once per split-view
+/// instance; afterwards user drags and window resizes (which rescale the
+/// split proportionally) are left alone.
+private struct InitialSplitSetter: NSViewRepresentable {
+    let fraction: CGFloat
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    final class Coordinator {
+        var configured: NSSplitView?
+    }
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        apply(from: view, coordinator: context.coordinator, attempt: 0)
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {}
+
+    /// The view may not be in its final hierarchy (or the split view may not
+    /// be sized) when makeNSView runs, so retry a few run-loop turns.
+    private func apply(from view: NSView, coordinator: Coordinator, attempt: Int) {
+        var split: NSSplitView?
+        var current = view.superview
+        while let candidate = current {
+            if let s = candidate as? NSSplitView { split = s; break }
+            current = candidate.superview
+        }
+        guard let split, split !== coordinator.configured, split.bounds.height > 0 else {
+            if attempt < 10 {
+                DispatchQueue.main.async { [weak view] in
+                    guard let view else { return }
+                    apply(from: view, coordinator: coordinator, attempt: attempt + 1)
+                }
+            }
+            return
+        }
+        coordinator.configured = split
+        split.setPosition(split.bounds.height * fraction, ofDividerAt: 0)
     }
 }

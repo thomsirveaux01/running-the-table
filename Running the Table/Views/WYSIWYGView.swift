@@ -16,63 +16,74 @@ struct WYSIWYGView: View {
     @StateObject private var columnDragState = ColumnDragState()
 
     var body: some View {
-        ScrollView([.horizontal, .vertical]) {
-            VStack(alignment: .leading, spacing: Self.divider) {
-                HStack(spacing: Self.divider) {
-                    Color(NSColor.controlBackgroundColor)
-                        .frame(width: Self.gutterWidth, height: Self.columnGutterHeight)
-                    ForEach(viewModel.columnWidths.indices, id: \.self) { col in
-                        ColumnMoveHandle(viewModel: viewModel, dragState: columnDragState, col: col)
-                            .frame(width: columnWidth(col), height: Self.columnGutterHeight)
-                            .offset(x: columnShift(col))
-                            .opacity(columnDragState.draggedCol == col ? 0.5 : 1)
-                            .zIndex(isColLifted(col) ? 1 : 0)
-                            .shadow(color: Color.black.opacity(isColLifted(col) ? 0.25 : 0),
-                                    radius: isColLifted(col) ? 8 : 0,
-                                    x: isColLifted(col) ? 3 : 0)
-                    }
-                }
-                // The caption sits above the first row but below the column
-                // strip, and stays put while the column handles slide: it
-                // belongs to the table, not to any column.
-                if viewModel.hasCaption {
-                    HStack(spacing: Self.divider) {
-                        Color(NSColor.controlBackgroundColor)
-                            .frame(width: Self.gutterWidth, height: Self.captionHeight)
-                        TextField("Table caption", text: viewModel.captionBinding)
-                            .textFieldStyle(.plain)
-                            .multilineTextAlignment(.center)
-                            .font(.headline)
-                            .padding(.horizontal, 6)
-                            .frame(width: gridColumnsWidth, height: Self.captionHeight)
-                            .background(Color(NSColor.controlBackgroundColor))
-                    }
-                }
-                HStack(spacing: Self.divider) {
-                    VStack(spacing: Self.divider) {
-                        ForEach(viewModel.table.rows.indices, id: \.self) { row in
-                            RowMoveHandle(viewModel: viewModel, dragState: dragState, row: row)
-                                .frame(width: Self.gutterWidth, height: rowHeight(row))
-                                .offset(y: rowOffset(row))
-                                .zIndex(isLifted(row) ? 1 : 0)
-                        }
-                    }
-                    cellLayer
-                }
+        // macOS 15 centers ScrollView content smaller than the viewport; a
+        // viewport-filling frame keeps the grid flush top-leading on every OS.
+        GeometryReader { proxy in
+            ScrollView([.horizontal, .vertical]) {
+                gridBlock
+                    .frame(minWidth: proxy.size.width, minHeight: proxy.size.height,
+                           alignment: .topLeading)
+                    .background(Color(NSColor.controlBackgroundColor))
             }
-            .padding(Self.divider)
-            // The separator color shows through the 1pt spacing as grid lines.
-            .background(Color(NSColor.separatorColor))
-            .overlay(alignment: .topLeading) { resizeHandles }
-            .overlay(alignment: .topLeading) { gapHighlight }
-            .overlay(alignment: .topLeading) { columnGapHighlight }
-            .overlay(alignment: .topLeading) { selectionBorder }
-            // Keyed on previewTick (fires only on landing-slot changes) so
-            // the dragged item tracks the cursor 1:1 between bumps.
-            .animation(.spring(response: 0.28, dampingFraction: 0.82), value: dragState.previewTick)
-            .animation(.spring(response: 0.28, dampingFraction: 0.82), value: columnDragState.previewTick)
         }
         .background(Color(NSColor.controlBackgroundColor))
+    }
+
+    private var gridBlock: some View {
+        VStack(alignment: .leading, spacing: Self.divider) {
+            HStack(spacing: Self.divider) {
+                Color(NSColor.controlBackgroundColor)
+                    .frame(width: Self.gutterWidth, height: Self.columnGutterHeight)
+                ForEach(viewModel.columnWidths.indices, id: \.self) { col in
+                    ColumnMoveHandle(viewModel: viewModel, dragState: columnDragState, col: col)
+                        .frame(width: columnWidth(col), height: Self.columnGutterHeight)
+                        .offset(x: columnShift(col))
+                        .opacity(columnDragState.draggedCol == col ? 0.5 : 1)
+                        .zIndex(isColLifted(col) ? 1 : 0)
+                        .shadow(color: Color.black.opacity(isColLifted(col) ? 0.25 : 0),
+                                radius: isColLifted(col) ? 8 : 0,
+                                x: isColLifted(col) ? 3 : 0)
+                }
+            }
+            // The caption sits above the first row but below the column
+            // strip, and stays put while the column handles slide: it
+            // belongs to the table, not to any column.
+            if viewModel.hasCaption {
+                HStack(spacing: Self.divider) {
+                    Color(NSColor.controlBackgroundColor)
+                        .frame(width: Self.gutterWidth, height: Self.captionHeight)
+                    TextField("Table caption", text: viewModel.captionBinding)
+                        .textFieldStyle(.plain)
+                        .multilineTextAlignment(.center)
+                        .font(.headline)
+                        .padding(.horizontal, 6)
+                        .frame(width: gridColumnsWidth, height: Self.captionHeight)
+                        .background(Color(NSColor.controlBackgroundColor))
+                }
+            }
+            HStack(spacing: Self.divider) {
+                VStack(spacing: Self.divider) {
+                    ForEach(viewModel.table.rows.indices, id: \.self) { row in
+                        RowMoveHandle(viewModel: viewModel, dragState: dragState, row: row)
+                            .frame(width: Self.gutterWidth, height: rowHeight(row))
+                            .offset(y: rowOffset(row))
+                            .zIndex(isLifted(row) ? 1 : 0)
+                    }
+                }
+                cellLayer
+            }
+        }
+        .padding(Self.divider)
+        // The separator color shows through the 1pt spacing as grid lines.
+        .background(Color(NSColor.separatorColor))
+        .overlay(alignment: .topLeading) { resizeHandles }
+        .overlay(alignment: .topLeading) { gapHighlight }
+        .overlay(alignment: .topLeading) { columnGapHighlight }
+        .overlay(alignment: .topLeading) { selectionBorder }
+        // Keyed on previewTick (fires only on landing-slot changes) so
+        // the dragged item tracks the cursor 1:1 between bumps.
+        .animation(.spring(response: 0.28, dampingFraction: 0.82), value: dragState.previewTick)
+        .animation(.spring(response: 0.28, dampingFraction: 0.82), value: columnDragState.previewTick)
     }
 
     static let captionHeight: CGFloat = 28

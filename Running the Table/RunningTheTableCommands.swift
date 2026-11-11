@@ -193,7 +193,7 @@ struct RunningTheTableCommands: Commands {
                 viewModel.duplicateSelectedDocument()
             }
             .keyboardShortcut("d")
-            .disabled(viewModel.selectedDocumentID == nil)
+            .disabled(viewModel.selectedDocumentIDs.isEmpty)
 
             // Greyed while a text view owns the caret — except during a cell
             // block, where the chord must reach the action to clear the block
@@ -202,7 +202,7 @@ struct RunningTheTableCommands: Commands {
                 viewModel.deleteTableChordPressed()
             }
             .keyboardShortcut(.delete, modifiers: .command)
-            .disabled(viewModel.selectedDocumentID == nil
+            .disabled(viewModel.selectedDocumentIDs.isEmpty
                       || (viewModel.isEditingText && viewModel.cellSelection == nil))
 
             Divider()
@@ -233,7 +233,7 @@ enum AboutPanel {
 
     // The link attribute makes "GitHub" clickable in the panel's text view.
     static var credits: NSAttributedString {
-        let text = "By Andrew Cunningham\nVibe-coded locally with Qwen3.8-27B\nGitHub"
+        let text = "By Andrew Cunningham\nVibe-coded locally with open-weight Apache 2.0 models on Apple Silicon Macs\nGitHub"
         let paragraph = NSMutableParagraphStyle()
         paragraph.alignment = .center
         let credits = NSMutableAttributedString(string: text, attributes: [

@@ -45,6 +45,8 @@ struct EditorSnapshot {
 final class TableViewModel: ObservableObject {
     @Published var documents: [TableDocument]
     @Published var selectedDocumentID: UUID?
+    /// The sidebar's ⌘-click set; the editor follows its last-clicked table.
+    @Published var sidebarSelection: Set<UUID> = []
     @Published var table: Table
     // Text views re-apply content only on revision bumps, so a stale render
     // can't revert text the user just typed.
@@ -82,7 +84,10 @@ final class TableViewModel: ObservableObject {
     @Published var showTemplateManager = false
     @Published var showRenamePrompt = false
     @Published var renameTitleText = ""
-    @Published var renameFileNameText = ""
+    /// The filename the rename sheet displays, derived live from the title.
+    var renameFileNameDisplay: String {
+        Self.sanitizedFileName(renameTitleText.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
     /// Notes on dropped or unclosed markup in the latest source-pane parse;
     /// empty whenever the grid generated the HTML.
     @Published private(set) var markupDiagnostics: [String] = []
@@ -98,6 +103,12 @@ final class TableViewModel: ObservableObject {
     static let minRowHeight: CGFloat = 24
 
     init() {
+        // One-time title-store migration. With a stored grant the library
+        // isn't reachable yet (the container is), so it runs in
+        // reloadFromDisk once launchOnce resolves the grant instead.
+        if LibraryLocation.defaults.data(forKey: LibraryLocation.bookmarkKey) == nil {
+            Self.migrateTitleStoreIfNeeded()
+        }
         documents = Self.loadStoredDocuments()
         templates = Self.loadStoredTemplates()
         selectedDocumentID = nil
@@ -132,7 +143,8 @@ final class TableViewModel: ObservableObject {
                 }
             }
         }
-        // Cache hits skip every write, so this only renames legacy files.
+        // The migration (above) already aligned filenames with names, so on a
+        // fresh launch every write is a cache hit and this is a no-op.
         saveAllDocuments()
     }
 
@@ -140,9 +152,13 @@ final class TableViewModel: ObservableObject {
     /// the running app (Settings change or container fallback).
     func reloadFromDisk() {
         flushToDocument()
+        // The grant is resolved by the time this runs, so the library is
+        // reachable and the one-time title-store migration is safe here.
+        Self.migrateTitleStoreIfNeeded()
         documents = Self.loadStoredDocuments()
         templates = Self.loadStoredTemplates()
         selectedDocumentID = nil
+        sidebarSelection = []
         table = Table.new()
         focusedCell = nil
         ensureSizing()
@@ -258,6 +274,7 @@ final class TableViewModel: ObservableObject {
         if let docID = snapshot.documentID, docID != selectedDocumentID {
             guard let doc = documents.first(where: { $0.id == docID }) else { return }
             selectedDocumentID = docID
+            sidebarSelection = [docID]
             table = doc.table
         }
         var restored = snapshot.table.deepCopied()
@@ -1093,6 +1110,7 @@ final class TableViewModel: ObservableObject {
         let doc = TableDocument.new(name: "Table \(documents.count + 1)")
         documents.append(doc)
         loadDocument(doc)
+        sidebarSelection = [doc.id]
     }
 
     func selectDocument(_ id: UUID) {
@@ -1101,8 +1119,32 @@ final class TableViewModel: ObservableObject {
         loadDocument(doc)
     }
 
-    /// Inline sidebar rename: the title is app-side metadata, so keystrokes
-    /// never touch the file — only the rename sheet moves files.
+    /// The tables the sidebar commands act on: the whole ⌘-selection,
+    /// falling back to the open table.
+    var selectedDocumentIDs: Set<UUID> {
+        sidebarSelection.isEmpty ? Set(selectedDocumentID.map { [$0] } ?? []) : sidebarSelection
+    }
+
+    /// The sidebar list's selection: plain click replaces, ⌘-click toggles.
+    /// The editor follows the last-clicked table; clearing keeps the open one.
+    func applySidebarSelection(_ new: Set<UUID>) {
+        let old = sidebarSelection
+        guard new != old else { return }
+        sidebarSelection = new
+        let added = new.subtracting(old)
+        let primary: UUID?
+        if let a = added.first {
+            primary = a
+        } else if let cur = selectedDocumentID, new.contains(cur) {
+            primary = cur
+        } else {
+            primary = new.isEmpty ? nil : documents.first { new.contains($0.id) }?.id
+        }
+        if let primary, primary != selectedDocumentID { selectDocument(primary) }
+    }
+
+    /// Inline sidebar rename: keystrokes update the in-memory name only; the
+    /// file follows when editing commits (commitInlineRename).
     func renameDocument(_ id: UUID, to newName: String) {
         guard let idx = documents.firstIndex(where: { $0.id == id }) else { return }
         let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1110,17 +1152,41 @@ final class TableViewModel: ObservableObject {
         if id == selectedDocumentID {
             table.name = documents[idx].name
         }
-        Self.syncTitleStore(with: documents)
     }
 
-    /// Opens the rename sheet pre-filled with the title and the file stem; an
-    /// unsaved table proposes a stem from its title. Nil means the selection.
+    /// Commits an inline sidebar rename: the file is moved to the new name.
+    func commitInlineRename(_ id: UUID) {
+        renameFileToMatchName(id)
+    }
+
+    /// Moves the document's file so its stem is the sanitized name. No-op when
+    /// unsaved (the first save derives the name) or when it already matches.
+    private func renameFileToMatchName(_ id: UUID) {
+        guard let idx = documents.firstIndex(where: { $0.id == id }),
+              let oldURL = documents[idx].fileURL else { return }
+        let newStem = Self.sanitizedFileName(documents[idx].name)
+        guard newStem != oldURL.deletingPathExtension().lastPathComponent else { return }
+        // Uniquify against other tables' files and orphans on disk (which
+        // would be clobbered by the move), but not the table's own file.
+        var taken = Set(documents.compactMap { $0.id == id ? nil : $0.fileURL?.path })
+        taken.formUnion((try? FileManager.default.contentsOfDirectory(
+            at: Self.saveDirectory, includingPropertiesForKeys: nil))?.map(\.path) ?? [])
+        taken.remove(oldURL.path)
+        let newURL = Self.uniqueFileURL(for: newStem, taken: &taken)
+        guard newURL != oldURL,
+              (try? FileManager.default.moveItem(at: oldURL, to: newURL)) != nil else { return }
+        documents[idx].fileURL = newURL
+        // Persist now: a rename with no further edits must not wait for the
+        // next autosave.
+        saveAllDocuments()
+    }
+
+    /// Opens the rename sheet pre-filled with the title; the filename is shown
+    /// (derived from the title) but not editable. Nil means the selection.
     func beginRename(_ id: UUID? = nil) {
         guard let id = id ?? selectedDocumentID, let doc = document(id: id) else { return }
         renamingID = id
         renameTitleText = doc.name
-        renameFileNameText = doc.fileURL?.deletingPathExtension().lastPathComponent
-            ?? Self.sanitizedFileName(doc.name)
         showRenamePrompt = true
     }
 
@@ -1130,15 +1196,13 @@ final class TableViewModel: ObservableObject {
         showRenamePrompt = false
         guard let id = renamingID else { return }
         let title = renameTitleText.trimmingCharacters(in: .whitespacesAndNewlines)
-        let fileName = renameFileNameText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !title.isEmpty, !fileName.isEmpty else { return }
-        applyRename(id: id, title: title, fileName: fileName)
+        guard !title.isEmpty else { return }
+        applyRename(id: id, title: title)
     }
 
-    /// Sets the title and moves the file if the stem changed. A title that
-    /// differs from the file stem is remembered in the app-side title
-    /// store, never written into the HTML.
-    private func applyRename(id: UUID, title: String, fileName: String) {
+    /// Sets the title and moves the file to the sanitized name, undoable as
+    /// one step. The filename is always derived from the title.
+    private func applyRename(id: UUID, title: String) {
         guard let idx = documents.firstIndex(where: { $0.id == id }) else { return }
         closeTypingGroup()
         flushToDocument()
@@ -1148,31 +1212,15 @@ final class TableViewModel: ObservableObject {
         let oldTitle = documents[idx].name
         let oldURL = documents[idx].fileURL
 
-        // Uniquify against other tables' files and orphans on disk (which
-        // would be clobbered by the move), but not the table's own file —
-        // renaming to the name it already has must be a no-op.
-        var taken = Set(documents.compactMap { $0.id == id ? nil : $0.fileURL?.path })
-        taken.formUnion((try? FileManager.default.contentsOfDirectory(
-            at: Self.saveDirectory, includingPropertiesForKeys: nil))?.map(\.path) ?? [])
-        if let oldURL { taken.remove(oldURL.path) }
-        let newURL = Self.uniqueFileURL(for: fileName, taken: &taken)
-
-        if let oldURL, oldURL != newURL {
-            try? FileManager.default.moveItem(at: oldURL, to: newURL)
-        }
         documents[idx].name = title
-        documents[idx].fileURL = newURL
         if id == selectedDocumentID {
             table.name = title
         }
-        // Persist now: a rename with no further edits must not wait for the
-        // next autosave.
-        saveAllDocuments()
-        Self.syncTitleStore(with: documents)
+        renameFileToMatchName(id)
 
         let afterDocuments = deepCopied(documents)
         let afterSelection = selectedDocumentID
-        registerFileRenameUndo(undoFile: oldURL, redoFile: newURL, name: "Rename \(oldTitle)",
+        registerFileRenameUndo(undoFile: oldURL, redoFile: documents[idx].fileURL, name: "Rename \(oldTitle)",
                                undoDocs: beforeDocuments, undoSelection: beforeSelection,
                                redoDocs: afterDocuments, redoSelection: afterSelection)
     }
@@ -1199,27 +1247,40 @@ final class TableViewModel: ObservableObject {
         try? FileManager.default.moveItem(at: from, to: to)
     }
 
-    /// The copy lands directly below its source and becomes the selection; it
-    /// is undoable as one step, like delete.
     func duplicateDocument(_ id: UUID) {
-        guard let idx = documents.firstIndex(where: { $0.id == id }) else { return }
+        duplicateDocuments([id])
+    }
+
+    /// Each copy lands directly below its source; the batch is one undo step
+    /// (per-ID loads would clear the stack and orphan earlier steps) and the
+    /// copies become the selection.
+    func duplicateDocuments(_ ids: Set<UUID>) {
+        let ordered = documents.filter { ids.contains($0.id) }
+        guard !ordered.isEmpty else { return }
         closeTypingGroup()
         flushToDocument()
         let beforeDocuments = deepCopied(documents)
         let beforeSelection = selectedDocumentID
 
-        let source = documents[idx]
-        // Fresh cells and a fresh id: editing the copy must not touch the source.
-        var copyTable = source.table.deepCopied(id: UUID())
-        copyTable.name = uniqueTableName(source.name)
-        let copy = TableDocument(table: copyTable, fileURL: nil)
-        documents.insert(copy, at: idx + 1)
-        loadDocument(copy)
+        var copyIDs: [UUID] = []
+        for source in ordered {
+            // Fresh cells and a fresh id: editing the copy must not touch the source.
+            var copyTable = source.table.deepCopied(id: UUID())
+            copyTable.name = uniqueTableName(source.name)
+            let copy = TableDocument(table: copyTable, fileURL: nil)
+            guard let idx = documents.firstIndex(where: { $0.id == source.id }) else { continue }
+            documents.insert(copy, at: idx + 1)
+            copyIDs.append(copy.id)
+        }
+        guard let lastID = copyIDs.last, let lastDoc = document(id: lastID) else { return }
+        loadDocument(lastDoc)
+        sidebarSelection = Set(copyIDs)
 
         let afterDocuments = deepCopied(documents)
         let afterSelection = selectedDocumentID
         // loadDocument clears the undo stack, so the pair registers after it.
-        registerDocumentUndo(name: "Duplicate \(source.name)",
+        let name = ordered.count == 1 ? "Duplicate \(ordered[0].name)" : "Duplicate \(ordered.count) Tables"
+        registerDocumentUndo(name: name,
                              undoTo: beforeDocuments, undoSelection: beforeSelection,
                              redoTo: afterDocuments, redoSelection: afterSelection)
     }
@@ -1237,8 +1298,11 @@ final class TableViewModel: ObservableObject {
     }
 
     /// Deleting a table is undoable: the whole document list plus the
-    /// selection are snapshotted and restored as one step.
-    func deleteDocument(_ id: UUID) {
+    /// selection are snapshotted and restored as one step. Batches pass
+    /// registerUndo: false and register a single combined step themselves —
+    /// the editor fallback's loadDocument clears the stack mid-batch, which
+    /// would orphan the earlier steps.
+    func deleteDocument(_ id: UUID, registerUndo: Bool = true) {
         guard let idx = documents.firstIndex(where: { $0.id == id }) else { return }
         closeTypingGroup()
         let beforeDocuments = deepCopied(documents)
@@ -1248,9 +1312,7 @@ final class TableViewModel: ObservableObject {
 
         documents.remove(at: idx)
         savedHTML.removeValue(forKey: id)
-        // Drop the deleted table's title key now; an undo re-adds it via
-        // restoreDocuments.
-        Self.syncTitleStore(with: documents)
+        sidebarSelection.remove(id)
         // The file goes with it; an undo restores the table and the next
         // autosave pass writes the file back.
         if let removedFileURL {
@@ -1261,11 +1323,18 @@ final class TableViewModel: ObservableObject {
             // empty state instead of auto-recreating a document.
             selectedDocumentID = nil
             focusedCell = nil
-            if let next = documents.first {
+            // The editor falls to the next ⌘-selected table, not just the
+            // first document.
+            let next = documents.first { sidebarSelection.contains($0.id) } ?? documents.first
+            if let next {
                 loadDocument(next)
+                sidebarSelection = [next.id]
+            } else {
+                sidebarSelection = []
             }
         }
 
+        guard registerUndo else { return }
         let afterDocuments = deepCopied(documents)
         let afterSelection = selectedDocumentID
         // registerDocumentUndo registers the entry AND restores inside its
@@ -1291,30 +1360,51 @@ final class TableViewModel: ObservableObject {
 
     private func restoreDocuments(_ docs: [TableDocument], selection: UUID?) {
         documents = deepCopied(docs)
-        // Titles ride with the documents they belong to.
-        Self.syncTitleStore(with: documents)
         if let sel = selection, let doc = documents.first(where: { $0.id == sel }) {
             loadDocument(doc)
+            sidebarSelection = [sel]
         } else if let first = documents.first {
             loadDocument(first)
+            sidebarSelection = [first.id]
         } else {
             // Undo restored the zero-tables state.
             selectedDocumentID = nil
             focusedCell = nil
+            sidebarSelection = []
         }
     }
 
     func duplicateSelectedDocument() {
-        if let id = selectedDocumentID { duplicateDocument(id) }
+        duplicateDocuments(selectedDocumentIDs)
     }
 
     func deleteSelectedDocument() {
-        if let id = selectedDocumentID { deleteDocument(id) }
+        deleteDocuments(selectedDocumentIDs)
+    }
+
+    /// One undo step for the whole batch; the captured IDs stay valid as the
+    /// list shrinks, and the combined registration lands after the editor
+    /// fallback's loadDocument has cleared the stack.
+    func deleteDocuments(_ ids: Set<UUID>) {
+        let ordered = documents.filter { ids.contains($0.id) }
+        guard !ordered.isEmpty else { return }
+        closeTypingGroup()
+        let beforeDocuments = deepCopied(documents)
+        let beforeSelection = selectedDocumentID
+        for doc in ordered { deleteDocument(doc.id, registerUndo: false) }
+        let afterDocuments = deepCopied(documents)
+        let afterSelection = selectedDocumentID
+        let name = ordered.count == 1
+            ? "Delete \(ordered[0].name)"
+            : "Delete \(ordered.count) Tables"
+        registerDocumentUndo(name: name,
+                             undoTo: beforeDocuments, undoSelection: beforeSelection,
+                             redoTo: afterDocuments, redoSelection: afterSelection)
     }
 
     func deleteDocument(at offsets: IndexSet) {
-        let ids = offsets.compactMap { idx in idx < documents.count ? documents[idx].id : nil }
-        for id in ids { deleteDocument(id) }
+        let ids = Set(offsets.compactMap { idx in idx < documents.count ? documents[idx].id : nil })
+        deleteDocuments(ids)
     }
 
     // MARK: - Templates
@@ -1361,6 +1451,7 @@ final class TableViewModel: ObservableObject {
         let doc = TableDocument(table: table, fileURL: nil)
         documents.append(doc)
         loadDocument(doc)
+        sidebarSelection = [doc.id]
     }
 
     /// Renaming moves the file. The old one goes only after the new write
@@ -1530,9 +1621,8 @@ final class TableViewModel: ObservableObject {
         saveAllDocuments()
     }
 
-    // A table's path is sticky: first save derives one from the title, and
-    // only the rename dialog (or a title set before that first save) moves
-    // the file afterwards, so inline title renames never churn the disk.
+    // The filename always mirrors the name: the first save derives it, and a
+    // rename (inline or dialog) has already moved the file to the new stem.
     func saveAllDocuments() {
         autosaveTimer?.invalidate()
         autosaveTimer = nil
@@ -1581,12 +1671,19 @@ final class TableViewModel: ObservableObject {
         return cleaned.isEmpty ? "Untitled Table" : cleaned
     }
 
-    // MARK: - Title store
+    // MARK: - Title store migration
 
-    /// App-side title metadata (never written into HTML), keyed by path because
-    /// Document UUIDs regenerate every load. Rebuilt wholesale from the live
-    /// documents on change, which keeps undo, deletes, and orphans honest.
+    /// The old app kept display titles in a UserDefaults store keyed by file
+    /// path, which a cold launch could wipe before the library grant resolved.
+    /// The name is now the source of truth and the filename always mirrors it,
+    /// so this one-time pass folds every stored title into its filename and
+    /// drops the store.
     private static let titlesByPathKey = "TableTitlesByPath"
+    // Keyed by the library path so a headless probe (its own directory) can't
+    // mark the user's real library as migrated.
+    private static var titlesMigratedKey: String {
+        "TitlesMigratedToFileName-" + canonicalPath(saveDirectory)
+    }
 
     // contentsOfDirectory reports symlinked paths resolved (/tmp → /private/tmp),
     // so both sides of the store must key on the canonical path or lookups miss.
@@ -1594,11 +1691,8 @@ final class TableViewModel: ObservableObject {
         url.resolvingSymlinksInPath().path
     }
 
-    private static func storedTitle(for url: URL) -> String? {
-        (UserDefaults.standard.dictionary(forKey: titlesByPathKey) as? [String: String])?[canonicalPath(url)]
-    }
-
-    /// Rewrite store keys when the library root moves so titles survive the move.
+    /// Rewrite store keys when the library root moves so titles survive the
+    /// move (only meaningful before the migration has consumed the store).
     static func rekeyTitles(from oldRoot: URL, to newRoot: URL) {
         let o = canonicalPath(oldRoot), n = canonicalPath(newRoot)
         guard o != n,
@@ -1611,14 +1705,40 @@ final class TableViewModel: ObservableObject {
         UserDefaults.standard.set(rebuilt, forKey: titlesByPathKey)
     }
 
-    private static func syncTitleStore(with docs: [TableDocument]) {
-        var map: [String: String] = [:]
-        for doc in docs {
-            guard let url = doc.fileURL else { continue }
+    /// Run once: rename each table file so its stem is the display name (from
+    /// the old store, then a legacy in-file name, then the stem), then drop the
+    /// store. Skips if the library can't be listed, so the store is never
+    /// destroyed without being consumed.
+    private static func migrateTitleStoreIfNeeded() {
+        let defaults = UserDefaults.standard
+        guard !defaults.bool(forKey: titlesMigratedKey) else { return }
+        guard let contents = try? FileManager.default.contentsOfDirectory(
+            at: saveDirectory, includingPropertiesForKeys: nil) else { return }
+        let files = contents
+            .filter { $0.pathExtension.lowercased() == "html" && !$0.lastPathComponent.hasPrefix(".") }
+            .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
+        let store = (defaults.dictionary(forKey: titlesByPathKey) as? [String: String]) ?? [:]
+        var taken = Set(files.map(\.path))
+        for url in files {
             let stem = url.deletingPathExtension().lastPathComponent
-            if doc.name != stem { map[canonicalPath(url)] = doc.name }
+            let html = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+            let legacy = HTMLParser.parseTable(html).legacyName?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let name = store[canonicalPath(url)] ?? (legacy?.isEmpty == false ? legacy! : stem)
+            let newStem = sanitizedFileName(name)
+            guard newStem != stem else { continue }
+            var candidate = saveDirectory.appendingPathComponent("\(newStem).html")
+            var suffix = 2
+            while taken.contains(candidate.path) {
+                candidate = saveDirectory.appendingPathComponent("\(newStem) \(suffix).html")
+                suffix += 1
+            }
+            guard (try? FileManager.default.moveItem(at: url, to: candidate)) != nil else { continue }
+            taken.remove(url.path)
+            taken.insert(candidate.path)
         }
-        UserDefaults.standard.set(map, forKey: titlesByPathKey)
+        defaults.removeObject(forKey: titlesByPathKey)
+        defaults.set(true, forKey: titlesMigratedKey)
     }
 
     private static func loadStoredDocuments() -> [TableDocument] {
@@ -1636,15 +1756,8 @@ final class TableViewModel: ObservableObject {
                 // Legacy saves named "----.html" surface as "Untitled Table".
                 let stemName = Self.sanitizedFileName(rawName) == "Untitled Table" ? "Untitled Table" : rawName
                 let parsed = HTMLParser.parseTable(html)
-                // Precedence: stored title, then a legacy in-file name, then
-                // the file stem for tables never retitled.
-                let seed = parsed.legacyName?.trimmingCharacters(in: .whitespacesAndNewlines)
-                let name = Self.storedTitle(for: url) ?? (seed?.isEmpty == false ? seed! : stemName)
-                return TableDocument(table: Table.loaded(from: parsed, name: name), fileURL: url)
+                return TableDocument(table: Table.loaded(from: parsed, name: stemName), fileURL: url)
             }
-        // Adopt any legacy seeds (and drop keys for files that no longer
-        // exist) so the next save can strip data-table-name for good.
-        syncTitleStore(with: docs)
         return docs
     }
 
@@ -1723,6 +1836,7 @@ final class TableViewModel: ObservableObject {
         let doc = TableDocument(table: table, fileURL: nil)
         documents.append(doc)
         loadDocument(doc)
+        sidebarSelection = [doc.id]
 
         registerDocumentUndo(name: "Paste as New Table",
                              undoTo: beforeDocuments, undoSelection: beforeSelection,

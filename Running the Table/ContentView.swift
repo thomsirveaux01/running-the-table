@@ -242,8 +242,8 @@ struct SidebarView: View {
 
     var body: some View {
         List(selection: Binding(
-            get: { viewModel.selectedDocumentID },
-            set: { if let id = $0 { viewModel.selectDocument(id) } }
+            get: { viewModel.sidebarSelection },
+            set: { viewModel.applySidebarSelection($0) }
         )) {
             ForEach(viewModel.documents) { document in
                 SidebarRow(viewModel: viewModel,
@@ -251,7 +251,11 @@ struct SidebarView: View {
                            isEditing: editingID == document.id,
                            beginEdit: { editingID = document.id },
                            endEdit: {
-                               if editingID == document.id { editingID = nil }
+                               guard editingID == document.id else { return }
+                               editingID = nil
+                               // The name changed on each keystroke; now move
+                               // the file to match it.
+                               viewModel.commitInlineRename(document.id)
                            })
                     .tag(document.id)
                     .opacity(swipedID == document.id ? 0.55 : 1)
@@ -259,6 +263,11 @@ struct SidebarView: View {
                         onDelete: { viewModel.deleteDocument(document.id) },
                         onRevealedChange: { swipedID = $0 ? document.id : nil }))
                     .contextMenu {
+                        // Finder-style: the row is in a ⌘-selection, so the
+                        // bulk commands take the whole set.
+                        let targetIDs = viewModel.sidebarSelection.contains(document.id)
+                            ? viewModel.sidebarSelection
+                            : [document.id]
                         Button("Rename…") {
                             viewModel.beginRename(document.id)
                         }
@@ -266,10 +275,10 @@ struct SidebarView: View {
                             viewModel.beginTemplateSave(from: document.id)
                         }
                         Button("Duplicate") {
-                            viewModel.duplicateDocument(document.id)
+                            viewModel.duplicateDocuments(targetIDs)
                         }
                         Button("Delete", role: .destructive) {
-                            viewModel.deleteDocument(document.id)
+                            viewModel.deleteDocuments(targetIDs)
                         }
                     }
                     .listRowBackground(separationRule(after: document))
@@ -279,10 +288,11 @@ struct SidebarView: View {
             }
         }
         .listStyle(.sidebar)
-        // Works only while the list itself has focus (not mid-rename).
+        // Works only while the list itself has focus (not mid-rename); the
+        // whole ⌘-selection goes.
         .onKeyPress(.delete) {
-            guard let id = viewModel.selectedDocumentID else { return .ignored }
-            viewModel.deleteDocument(id)
+            guard viewModel.selectedDocumentID != nil else { return .ignored }
+            viewModel.deleteSelectedDocument()
             return .handled
         }
     }
@@ -335,6 +345,16 @@ struct SidebarRow: View {
         )
     }
 
+    // The file's mtime stands in for "last edited": autosave rewrites it on
+    // every change and steady-state launches never rewrite unchanged files.
+    private var modifiedCaption: String {
+        guard let url = viewModel.document(id: documentID)?.fileURL,
+              let mtime = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+        else { return "Not saved yet" }
+        // "Nov 11, 2:14 PM" — the year and "at" push past the sidebar's width.
+        return "\(mtime.formatted(.dateTime.month(.abbreviated).day())), \(mtime.formatted(.dateTime.hour().minute()))"
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
             if isEditing {
@@ -350,7 +370,7 @@ struct SidebarRow: View {
                     // No contentShape(): a full-row hit target steals the swipe.
                     .onTapGesture(count: 2) { beginEdit() }
             }
-            Text(viewModel.document(id: documentID)?.fileURL?.lastPathComponent ?? "Not saved yet")
+            Text(modifiedCaption)
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
