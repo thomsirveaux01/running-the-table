@@ -65,7 +65,10 @@ final class TableViewModel: ObservableObject {
             }
         }
     }
-    @Published var selectionRange = NSRange(location: 0, length: 0)
+    // Plain var, not @Published: nothing observes it, and publishing it from
+    // focusedCell's didSet during a view update trips SwiftUI's "publishing
+    // from within view updates" fault.
+    var selectionRange = NSRange(location: 0, length: 0)
     /// Rectangular drag selection in visual coordinates; nil when none.
     @Published var cellSelection: VisualCellRange?
     @Published var columnWidths: [CGFloat] = []

@@ -243,7 +243,12 @@ struct SidebarView: View {
     var body: some View {
         List(selection: Binding(
             get: { viewModel.sidebarSelection },
-            set: { viewModel.applySidebarSelection($0) }
+            set: { newValue in
+                // SwiftUI hands the List's selection change to this setter during
+                // its own view-update pass; applySidebarSelection loads a document,
+                // which would publish mid-update. Defer to the next main-actor turn.
+                Task { @MainActor in viewModel.applySidebarSelection(newValue) }
+            }
         )) {
             ForEach(viewModel.documents) { document in
                 SidebarRow(viewModel: viewModel,

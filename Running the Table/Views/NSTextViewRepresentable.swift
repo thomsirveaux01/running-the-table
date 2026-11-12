@@ -482,7 +482,12 @@ struct NSTextViewRepresentable: NSViewRepresentable {
         func textDidEndEditing(_ notification: Notification) {
             guard let textView = notification.object as? NSTextView else { return }
             let loc = min(textView.selectedRange().location, (textView.string as NSString).length)
+            // Guard the echo: this programmatic swap fires selectionDidChange,
+            // and publishing it mid-view-update is the "publishing from within
+            // view updates" fault.
+            applyingProgrammaticContent = true
             textView.selectedRanges = [NSValue(range: NSRange(location: loc, length: 0))]
+            applyingProgrammaticContent = false
         }
 
         // Derived decoration only: layout-manager temporary attributes never
