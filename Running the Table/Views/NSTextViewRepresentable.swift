@@ -488,6 +488,11 @@ struct NSTextViewRepresentable: NSViewRepresentable {
             applyingProgrammaticContent = true
             textView.selectedRanges = [NSValue(range: NSRange(location: loc, length: 0))]
             applyingProgrammaticContent = false
+            // The guard swallows the echo that used to sync the model, so
+            // report the collapse explicitly, off the update pass.
+            DispatchQueue.main.async { [parent] in
+                parent.onSelectionChange(NSRange(location: loc, length: 0))
+            }
         }
 
         // Derived decoration only: layout-manager temporary attributes never
