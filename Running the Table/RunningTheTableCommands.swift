@@ -53,8 +53,23 @@ struct RunningTheTableCommands: Commands {
                 }
             }
 
+            // ⇧⌘S is the standard Save As chord: a template is a saved variant.
             Button("Save as Template…") { viewModel.beginTemplateSave() }
+                .keyboardShortcut("S", modifiers: [.command, .shift])
                 .disabled(viewModel.selectedDocumentID == nil)
+
+            // Submenus leave room for Markdown and friends later; Export needs
+            // a live table, Import works with none selected.
+            Divider()
+
+            Menu("Import") {
+                Button("CSV…") { viewModel.importCSV() }
+            }
+
+            Menu("Export") {
+                Button("CSV…") { viewModel.exportCSV() }
+                    .disabled(viewModel.selectedDocumentID == nil)
+            }
         }
 
         // Stock undo:/redo: dispatch down the responder chain, which only cell
@@ -164,6 +179,9 @@ struct RunningTheTableCommands: Commands {
                             Text(alignment.menuTitle)
                         }
                     }
+                    // The Cocoa-standard alignment chords; only the menu prints
+                    // them, so they live on these items, not the toolbar pills.
+                    .keyboardShortcut(KeyEquivalent(alignment.alignKey), modifiers: .command)
                     .disabled(viewModel.focusedCell == nil)
                 }
             }
@@ -234,7 +252,10 @@ struct RunningTheTableCommands: Commands {
 
             Button("Manage Templates…") { viewModel.showTemplateManager = true }
 
+            // ⌘1 mirrors Excel's Format Cells: a dialog that formats the
+            // current table.
             Button("Table Attributes…") { viewModel.beginTableAttributes() }
+                .keyboardShortcut("1")
                 .disabled(viewModel.selectedDocumentID == nil)
         }
     }

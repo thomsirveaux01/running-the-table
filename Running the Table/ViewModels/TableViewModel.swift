@@ -2006,6 +2006,84 @@ final class TableViewModel: ObservableObject {
         return candidate
     }
 
+    // MARK: - CSV import/export
+
+    /// File ▸ Import ▸ CSV…: pick a file, parse it, and load the result as a
+    /// new document in one undo step (the pasteAsNewTable pattern).
+    func importCSV() {
+        Self.csvImporter.chooseCSVFile(prompt: "Import", into: nil) { [weak self] url in
+            guard let self, let url else { return }
+            self.importCSVFile(at: url)
+        }
+    }
+
+    func importCSVFile(at url: URL) {
+        let accessed = Self.csvBeginAccess(url)
+        defer { if accessed { Self.csvEndAccess(url) } }
+        guard var text = try? String(contentsOf: url, encoding: .utf8) else { return }
+        // A UTF-8 BOM would otherwise ride into the first cell.
+        if text.hasPrefix("\u{FEFF}") { text.removeFirst() }
+        let grid = CSV.parse(text)
+        guard !grid.isEmpty else { return }
+        newTable(fromCSVGrid: grid, name: url.deletingPathExtension().lastPathComponent)
+    }
+
+    /// Builds a body-only table from a parsed grid (the first row is plain
+    /// cells, not a header) and loads it as a new undoable document.
+    func newTable(fromCSVGrid grid: [[String]], name: String) {
+        closeTypingGroup()
+        flushToDocument()
+        let beforeDocuments = deepCopied(documents)
+        let beforeSelection = selectedDocumentID
+
+        let displayName = uniqueName(name, avoiding: Set(documents.map(\.name)))
+        var table = Table(rows: grid.map { row in
+            TableRow(cells: row.map { TableCell(content: HTMLParser.plainAttributed($0)) })
+        }, name: displayName)
+        table.normalize()
+        let doc = TableDocument(table: table, fileURL: nil)
+        documents.append(doc)
+        loadDocument(doc)
+        sidebarSelection = [doc.id]
+
+        registerDocumentUndo(name: "Import \(displayName)",
+                             undoTo: beforeDocuments, undoSelection: beforeSelection,
+                             redoTo: deepCopied(documents), redoSelection: selectedDocumentID)
+    }
+
+    /// File ▸ Export ▸ CSV…: pick a destination and write the whole table,
+    /// merged cells flattened to their top-left slot.
+    func exportCSV() {
+        guard selectedDocumentID != nil else { return }
+        let suggested = TableViewModel.sanitizedFileName(table.name) + ".csv"
+        Self.csvExporter.chooseCSVFile(prompt: "Export", suggestedName: suggested,
+                                       defaultURL: Self.saveDirectory, into: nil) { [weak self] url in
+            guard let self, let url else { return }
+            self.exportCSVFile(to: url)
+        }
+    }
+
+    func exportCSVFile(to url: URL) {
+        let accessed = Self.csvBeginAccess(url)
+        defer { if accessed { Self.csvEndAccess(url) } }
+        try? CSV.encode(flattenTable()).write(to: url, atomically: true, encoding: .utf8)
+    }
+
+    /// The whole table as a rectangular string grid: each cell's text lands in
+    /// its top-left visual slot and merge-covered slots stay blank.
+    func flattenTable() -> [[String]] {
+        let cols = max(table.columnCount, 1)
+        let slots = table.placements()
+        var grid = Array(repeating: Array(repeating: "", count: cols), count: table.rows.count)
+        for row in table.rows.indices {
+            for p in slots[row] {
+                guard p.startCol < cols else { continue }
+                grid[row][p.startCol] = table.rows[row].cells[p.cellIndex].plainString
+            }
+        }
+        return grid
+    }
+
     /// True when a text view owns the caret. Field editors are NSTextViews, so
     /// cells, the source pane, renames and the link sheet are one check.
     static func caretInTextView(_ window: NSWindow?) -> Bool {
@@ -2081,4 +2159,12 @@ final class TableViewModel: ObservableObject {
         if let override = saveDirectoryOverride { return override }
         return LibraryLocation.directory
     }
+
+    // CSV file picking behind injectable seams so a headless probe scripts the
+    // chosen URL instead of raising a panel; the access pair brackets the
+    // one-time security-scoped read or write.
+    static var csvImporter: CSVFileImporting = SystemCSVImporter()
+    static var csvExporter: CSVFileExporting = SystemCSVExporter()
+    static var csvBeginAccess: (URL) -> Bool = { $0.startAccessingSecurityScopedResource() }
+    static var csvEndAccess: (URL) -> Void = { $0.stopAccessingSecurityScopedResource() }
 }

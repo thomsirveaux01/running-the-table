@@ -74,6 +74,17 @@ extension NSTextAlignment {
         }
     }
 
+    /// The Cocoa-standard alignment chord key (⌘{ / ⌘| / ⌘}, as in
+    /// TextEdit, Notes, and Pages).
+    var alignKey: Character {
+        switch self {
+        case .left: return "{"
+        case .center: return "|"
+        case .right: return "}"
+        default: return " "
+        }
+    }
+
     /// The HTML spelling of the alignment for a style attribute.
     var htmlName: String {
         switch self {
