@@ -3,14 +3,16 @@ import Combine
 import SwiftUI
 
 /// Row/column edits a cell's context menu offers; the raw value rides along as
-/// the menu item's tag so one action method dispatches all four.
+/// the menu item's tag so one action method dispatches them all.
 enum CellCommand: Int {
-    case addRowAbove, addRowBelow, addColumnLeft, addColumnRight
+    case addRowAbove, addRowBelow, addColumnLeft, addColumnRight,
+        duplicateRow, duplicateColumn
 }
 
 private let cellCommandTitles: [(CellCommand, String)] = [
     (.addRowAbove, "Add Row Above"), (.addRowBelow, "Add Row Below"),
     (.addColumnLeft, "Add Column Left"), (.addColumnRight, "Add Column Right"),
+    (.duplicateRow, "Duplicate Row"), (.duplicateColumn, "Duplicate Column"),
 ]
 
 // Drops AppKit's system items from a text view's context menu: the
@@ -62,6 +64,9 @@ final class CellTextView: NSTextView, NSMenuDelegate {
     var flushPendingEditsHandler: (() -> Void)?
     /// Non-nil only in the grid: the HTML source pane has no rows to add.
     var cellCommandHandler: ((CellCommand) -> Void)?
+    /// Greys out a context-menu command the current cell can't run (duplicate
+    /// on a merge-touched row/column); nil leaves every command enabled.
+    var cellCommandValidator: ((CellCommand) -> Bool)?
     /// Return true from keyDown handling to consume the event before typing.
     var keyCommandHandler: ((NSEvent) -> Bool)?
     weak var undoManagerOverride: UndoManager?
@@ -246,6 +251,13 @@ final class CellTextView: NSTextView, NSMenuDelegate {
             return undoManagerOverride?.canUndo ?? false
         case #selector(redo(_:)):
             return undoManagerOverride?.canRedo ?? false
+        case #selector(performCellCommand(_:)):
+            // The tag carries the CellCommand; the validator greys out what the
+            // current cell can't run (e.g. duplicate on a merge-touched row).
+            if let kind = CellCommand(rawValue: menuItem.tag) {
+                return cellCommandValidator?(kind) ?? true
+            }
+            return false
         default:
             return super.validateMenuItem(menuItem)
         }
@@ -337,6 +349,8 @@ struct NSTextViewRepresentable: NSViewRepresentable {
     var highlightsCurrentLine = false
     /// Row/column commands for the context menu; nil outside the grid.
     var cellCommands: ((CellCommand) -> Void)? = nil
+    /// Greys out a context-menu command the cell can't run; nil = all enabled.
+    var cellCommandValidator: ((CellCommand) -> Bool)? = nil
     /// Drag-selection support, set only on grid cells: this slot's visual
     /// rectangle, and the grid's point→cell hit-test and selection sink.
     var gridVisualOrigin: VisualCell?
@@ -485,10 +499,14 @@ struct NSTextViewRepresentable: NSViewRepresentable {
         // Must go nil outside the grid, or the HTML pane would offer dead row commands.
         if cellCommands == nil {
             textView.cellCommandHandler = nil
+            textView.cellCommandValidator = nil
         } else {
             textView.cellCommandHandler = { [weak coordinator] command in
                 guard let commands = coordinator?.parent.cellCommands else { return }
                 commands(command)
+            }
+            textView.cellCommandValidator = { [weak coordinator] command in
+                coordinator?.parent.cellCommandValidator?(command) ?? true
             }
         }
         textView.gridVisualOrigin = gridVisualOrigin

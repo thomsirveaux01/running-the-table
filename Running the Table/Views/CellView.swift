@@ -43,6 +43,15 @@ struct CellView: View {
                     case .addRowBelow: viewModel.addRow(adjacentTo: here, after: true)
                     case .addColumnLeft: viewModel.addColumn(adjacentTo: here, after: false)
                     case .addColumnRight: viewModel.addColumn(adjacentTo: here, after: true)
+                    case .duplicateRow: viewModel.duplicateRow(adjacentTo: here, after: true)
+                    case .duplicateColumn: viewModel.duplicateColumn(adjacentTo: here, after: true)
+                    }
+                },
+                cellCommandValidator: { command in
+                    switch command {
+                    case .duplicateRow: return viewModel.canDuplicateRow(row)
+                    case .duplicateColumn: return viewModel.canDuplicateColumn(startCol)
+                    default: return true
                     }
                 },
                 gridVisualOrigin: VisualCell(row: row, column: startCol),

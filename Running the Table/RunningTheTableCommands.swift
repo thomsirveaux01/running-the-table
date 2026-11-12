@@ -210,6 +210,16 @@ struct RunningTheTableCommands: Commands {
             .keyboardShortcut("d")
             .disabled(viewModel.selectedDocumentIDs.isEmpty)
 
+            Button("Duplicate Row") {
+                viewModel.duplicateRow()
+            }
+            .disabled(!viewModel.canDuplicateFocusedRow)
+
+            Button("Duplicate Column") {
+                viewModel.duplicateColumn()
+            }
+            .disabled(!viewModel.canDuplicateFocusedColumn)
+
             // Greyed while a text view owns the caret — except during a cell
             // block, where the chord must reach the action to clear the block
             // (a disabled item would swallow it).

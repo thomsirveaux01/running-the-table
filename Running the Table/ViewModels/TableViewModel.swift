@@ -597,6 +597,90 @@ final class TableViewModel: ObservableObject {
         return !table.columnHasMerge(p.startCol)
     }
 
+    // MARK: - Duplicate row/column
+
+    /// A row a rowspan touches can't be copied: the duplicate would overlap the
+    /// merge's covered rows, so those rows stay unduplicable until split (the
+    /// same gate as removeRow).
+    func canDuplicateRow(_ row: Int) -> Bool {
+        table.rows.indices.contains(row) && !table.rowspanCrosses(rows: row, row)
+    }
+
+    var canDuplicateFocusedRow: Bool {
+        guard let f = focusedCell else { return false }
+        return canDuplicateRow(f.row)
+    }
+
+    /// Deep-copies the row and inserts the copy adjacent; fresh cells, so
+    /// editing one never touches the other. The copy keeps the source's height
+    /// and section (a <th> row duplicates as <th>).
+    func duplicateRow(adjacentTo cell: GridCell, after: Bool) {
+        guard canDuplicateRow(cell.row) else { return }
+        let index = cell.row + (after ? 1 : 0)
+        performUndoable(after ? "Duplicate Row" : "Duplicate Row Above") {
+            self.table.rows.insert(self.table.rows[cell.row].deepCopy(), at: index)
+            if self.rowHeights.indices.contains(cell.row) {
+                self.rowHeights.insert(self.rowHeights[cell.row], at: index)
+            }
+            self.table.normalize()
+            self.demoteNonHeaderRows()
+            self.ensureSizing()
+            self.growRowIfNeeded(index)
+            self.focusedCell = GridCell(row: index, column: cell.column)
+            self.flushToDocument()
+            self.regenerateHTML()
+        }
+    }
+
+    func duplicateRow() {
+        guard let f = focusedCell else { return }
+        duplicateRow(adjacentTo: f, after: true)
+    }
+
+    /// A column any merge touches can't be copied: a colspan makes the copy
+    /// ambiguous and a rowspan leaves covered rows with no cell to copy (the
+    /// same gate as removeColumn).
+    func canDuplicateColumn(_ col: Int) -> Bool {
+        guard col >= 0, col < table.columnCount else { return false }
+        return !table.columnHasMerge(col)
+    }
+
+    var canDuplicateFocusedColumn: Bool {
+        guard let f = focusedCell, let p = placement(of: f) else { return false }
+        return canDuplicateColumn(p.startCol)
+    }
+
+    /// Deep-copies each row's cell in the column and inserts the copies
+    /// adjacent, so the new column carries the source's values, header status,
+    /// and width.
+    func duplicateColumn(adjacentTo cell: GridCell, after: Bool) {
+        guard let p = placement(of: cell),
+              let sourceIdx = cellIndex(containingColumn: p.startCol, in: table.rows[cell.row])
+        else { return }
+        let col = p.startCol
+        guard canDuplicateColumn(col) else { return }
+        performUndoable(after ? "Duplicate Column" : "Duplicate Column Left") {
+            for row in self.table.rows.indices {
+                guard let idx = self.cellIndex(containingColumn: col, in: self.table.rows[row]) else { continue }
+                self.table.rows[row].insert(self.table.rows[row][idx].deepCopy(), at: after ? idx + 1 : idx)
+            }
+            if self.columnWidths.indices.contains(col) {
+                self.columnWidths.insert(self.columnWidths[col], at: after ? col + 1 : col)
+            }
+            self.table.normalize()
+            self.demoteNonHeaderRows()
+            self.ensureSizing()
+            self.focusedCell = GridCell(row: cell.row, column: after ? sourceIdx + 1 : sourceIdx)
+            self.flushToDocument()
+            self.regenerateHTML()
+        }
+    }
+
+    func duplicateColumn() {
+        guard let f = focusedCell else { return }
+        duplicateColumn(adjacentTo: f, after: true)
+    }
+
     /// Rows a merge touches can't travel alone (the covered rows or the
     /// merge's lower half would be left behind), so their handles sit idle.
     func canMoveRow(_ row: Int) -> Bool {
