@@ -153,6 +153,21 @@ struct RunningTheTableCommands: Commands {
                 }
             }
 
+            Menu("Align") {
+                ForEach([NSTextAlignment.left, .center, .right], id: \.self) { alignment in
+                    Button {
+                        viewModel.setAlignment(alignment)
+                    } label: {
+                        if viewModel.alignment == alignment {
+                            Label(alignment.menuTitle, systemImage: "checkmark")
+                        } else {
+                            Text(alignment.menuTitle)
+                        }
+                    }
+                    .disabled(viewModel.focusedCell == nil)
+                }
+            }
+
             Divider()
 
             Button("Merge Cells") { viewModel.mergeSelection() }

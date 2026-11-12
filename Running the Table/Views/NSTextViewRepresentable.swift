@@ -13,10 +13,51 @@ private let cellCommandTitles: [(CellCommand, String)] = [
     (.addColumnLeft, "Add Column Left"), (.addColumnRight, "Add Column Right"),
 ]
 
+// Drops AppKit's system items from a text view's context menu: the
+// suggestion cluster (Siri/Look Up/Translate), the Font submenu, AutoFill, and
+// Services. Selectors measured offscreen (tools/viewmenu); Font's identifier
+// is nib-generated. Called from menu(for:) and again from the display-cycle
+// hooks below, because AppKit injects AutoFill/Services after menu(for:)
+// returns.
+func pruneSystemItems(from menu: NSMenu) {
+    // "_rvMenuItemAction" is the remote-view item Siri, Look Up, and
+    // Translate are rendered through.
+    let suggestions: Set<String> = ["_rvMenuItemAction", "_searchWithGoogleFromMenu:"]
+    let fontPanel = NSSelectorFromString("orderFrontFontPanel:")
+    let servicesAction = NSSelectorFromString("orderFrontServicesMenu:")
+    // Removals leave leading and doubled dividers; a dropped item counts as
+    // transparent, so dividers either side of the Font submenu collapse too.
+    var previousWasSeparator = true
+    var drop: [NSMenuItem] = []
+    for item in menu.items {
+        let action = item.action.map(NSStringFromSelector) ?? ""
+        // Services: matched by the services-menu identity (its submenu IS
+        // NSApp.servicesMenu), its action, or its title. Guard the nil case:
+        // with no services menu, `submenu === nil` would match every item
+        // that has no submenu (Cut, Copy, …).
+        let isServices = (NSApp.servicesMenu != nil && item.submenu === NSApp.servicesMenu)
+            || item.action == servicesAction
+            || item.title == "Services"
+        // AutoFill has no stable public selector, so it is matched by title.
+        let isAutoFill = item.title.lowercased() == "autofill"
+        if suggestions.contains(action) || isServices || isAutoFill
+            || item.submenu?.items.contains(where: { $0.action == fontPanel }) == true {
+            drop.append(item)
+        } else if item.isSeparatorItem {
+            if previousWasSeparator { drop.append(item) }
+            previousWasSeparator = true
+        } else {
+            previousWasSeparator = false
+        }
+    }
+    drop.forEach { menu.removeItem($0) }
+    while menu.items.last?.isSeparatorItem == true { menu.removeItem(at: menu.items.count - 1) }
+}
+
 // Focus is never forced from updateNSView — AppKit raises
 // NSInternalInconsistencyException for that; the subclass reports native
 // activation instead.
-final class CellTextView: NSTextView {
+final class CellTextView: NSTextView, NSMenuDelegate {
     var didBecomeFirstResponderHandler: (() -> Void)?
     var flushPendingEditsHandler: (() -> Void)?
     /// Non-nil only in the grid: the HTML source pane has no rows to add.
@@ -41,6 +82,10 @@ final class CellTextView: NSTextView {
     /// ⌘V with a table on the pasteboard makes a new table instead of dumping
     /// flat text into the cell; returns true when handled. Nil outside the grid.
     var pasteTableHandler: (() -> Bool)?
+    /// Colspan context-menu support, set only in the grid: read the cell's
+    /// current span (for the checkmark) and set a new one.
+    var colspanCurrent: (() -> Int)?
+    var colspanSet: ((Int) -> Void)?
     private var isDraggingCells = false
 
     // nil, not the shared manager: AppKit's typing path registers ungrouped
@@ -176,6 +221,25 @@ final class CellTextView: NSTextView {
         if let kind = CellCommand(rawValue: sender.tag) { cellCommandHandler?(kind) }
     }
 
+    @objc private func performColspan(_ sender: NSMenuItem) {
+        colspanSet?(sender.tag)
+    }
+
+    /// The Colspan submenu for the context menu, mirroring Format ▸ Colspan:
+    /// items 1–6 with a checkmark on the cell's current span.
+    func buildColspanMenu() -> NSMenu {
+        let menu = NSMenu(title: "Colspan")
+        let current = colspanCurrent?() ?? 1
+        for span in TableCell.minColspan...TableCell.maxColspan {
+            let item = NSMenuItem(title: "\(span)", action: #selector(performColspan(_:)), keyEquivalent: "")
+            item.target = self
+            item.tag = span
+            item.state = (span == current) ? .on : .off
+            menu.addItem(item)
+        }
+        return menu
+    }
+
     override func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         switch menuItem.action {
         case #selector(undo(_:)):
@@ -187,37 +251,30 @@ final class CellTextView: NSTextView {
         }
     }
 
-    // Drops AppKit's system-suggestion cluster and the Font submenu. Selectors
-    // measured offscreen (tools/viewmenu); Font's identifier is nib-generated.
     override func menu(for event: NSEvent) -> NSMenu? {
         guard let menu = super.menu(for: event) else { return nil }
-        // "_rvMenuItemAction" is the remote-view item Siri, Look Up, and
-        // Translate are rendered through.
-        let suggestions: Set<String> = ["_rvMenuItemAction", "_searchWithGoogleFromMenu:"]
-        let fontPanel = NSSelectorFromString("orderFrontFontPanel:")
-        // Removals leave leading and doubled dividers; a dropped item counts as
-        // transparent, so dividers either side of the Font submenu collapse too.
-        var previousWasSeparator = true
-        var drop: [NSMenuItem] = []
-        for item in menu.items {
-            let action = item.action.map(NSStringFromSelector) ?? ""
-            if suggestions.contains(action) || item.submenu?.items.contains(where: { $0.action == fontPanel }) == true {
-                drop.append(item)
-            } else if item.isSeparatorItem {
-                if previousWasSeparator { drop.append(item) }
-                previousWasSeparator = true
-            } else {
-                previousWasSeparator = false
-            }
-        }
-        drop.forEach { menu.removeItem($0) }
-        while menu.items.last?.isSeparatorItem == true { menu.removeItem(at: menu.items.count - 1) }
+        // AutoFill and Services are "contextual menu plug-in" items AppKit
+        // appends during display, after every delegate hook — so they can't be
+        // pruned, only opted out of. This flag (the mechanism Firefox and
+        // Chromium use) stops the append at the source.
+        menu.allowsContextMenuPlugIns = false
+        pruneSystemItems(from: menu)
         insertCellCommands(in: menu)
+        // Belt and braces: re-prune from the delegate right before the menu is
+        // drawn, in case any system item slips past the flag.
+        menu.delegate = self
         return menu
     }
 
-    // Grid cells get row/column edits right after the paste group, where the
-    // pruned menu already leaves a divider to close the group with.
+    // Last-chance prune right before the menu is drawn, catching any system
+    // item (Font submenu, suggestion cluster) that survives the flag.
+    func menuWillOpen(_ menu: NSMenu) {
+        pruneSystemItems(from: menu)
+    }
+
+    // Grid cells get row/column edits and the Colspan submenu right after the
+    // paste group, where the pruned menu already leaves a divider to close the
+    // group with.
     private func insertCellCommands(in menu: NSMenu) {
         guard cellCommandHandler != nil else { return }
         let pasteActions: Set<String> = ["cut:", "copy:", "paste:", "pasteAsPlainText:"]
@@ -228,9 +285,18 @@ final class CellTextView: NSTextView {
             item.tag = entry.0.rawValue
             menu.insertItem(item, at: at + offset)
         }
-        if at + cellCommandTitles.count < menu.items.count,
-           !menu.items[at + cellCommandTitles.count].isSeparatorItem {
-            menu.insertItem(.separator(), at: at + cellCommandTitles.count)
+        // Colspan rides with the cell-structure commands; colspanSet is nil in
+        // the HTML pane, so it appears only in the grid.
+        var count = cellCommandTitles.count
+        if colspanSet != nil {
+            let item = NSMenuItem(title: "Colspan", action: nil, keyEquivalent: "")
+            item.submenu = buildColspanMenu()
+            menu.insertItem(item, at: at + count)
+            count += 1
+        }
+        if at + count < menu.items.count,
+           !menu.items[at + count].isSeparatorItem {
+            menu.insertItem(.separator(), at: at + count)
         }
     }
 }
@@ -249,6 +315,9 @@ struct NSTextViewRepresentable: NSViewRepresentable {
     /// Live read from the view model — never a render-time snapshot.
     var contentProvider: () -> NSAttributedString
     var isHeader: Bool
+    /// The cell's alignment; the macOS 27 SDK has no NSTextView.textAlignment,
+    /// so it is rendered as a paragraph style written into the storage.
+    var textAlignment: NSTextAlignment = .left
     var scrolls: Bool = false
     var font: NSFont = NSFont.systemFont(ofSize: NSFont.systemFontSize)
     var undoManager: UndoManager? = nil
@@ -279,6 +348,10 @@ struct NSTextViewRepresentable: NSViewRepresentable {
     var copyCells: (() -> Bool)?
     /// ⌘V with a table on the pasteboard makes a new table; true = handled.
     var pasteTable: (() -> Bool)?
+    /// Colspan context-menu support, set only in the grid: read the cell's
+    /// current span (for the checkmark) and set a new one on the cell.
+    var colspanCurrent: (() -> Int)?
+    var colspanSet: ((Int) -> Void)?
 
     /// labelColor is appearance-dynamic; text lacking .foregroundColor
     /// renders BLACK regardless of textColor — invisible in dark mode.
@@ -335,6 +408,7 @@ struct NSTextViewRepresentable: NSViewRepresentable {
         context.coordinator.applyingProgrammaticContent = true
         textView.textStorage?.setAttributedString(content)
         context.coordinator.applyingProgrammaticContent = false
+        context.coordinator.applyAlignment(to: textView)
         textView.setContentHuggingPriority(.defaultLow, for: .horizontal)
         textView.setContentHuggingPriority(.defaultLow, for: .vertical)
 
@@ -372,6 +446,9 @@ struct NSTextViewRepresentable: NSViewRepresentable {
         if context.coordinator.lastAppliedRevision != contentRevision {
             context.coordinator.apply(content: content, revision: contentRevision, to: textView)
         }
+        // The revision publisher can run apply() before this pass refreshes
+        // `parent`, so re-check the alignment here where it is guaranteed fresh.
+        context.coordinator.applyAlignmentIfNeeded(to: textView)
 
         // Focus bridge: follow false→true grid moves only when the keyboard
         // is already in the grid; initial creation (nil→true) must not steal
@@ -421,12 +498,15 @@ struct NSTextViewRepresentable: NSViewRepresentable {
         textView.cellRangeHandler = cellRangeHandler
         textView.copyCellsHandler = copyCells
         textView.pasteTableHandler = pasteTable
+        textView.colspanCurrent = colspanCurrent
+        textView.colspanSet = colspanSet
     }
 
     final class Coordinator: NSObject, NSTextViewDelegate {
         var parent: NSTextViewRepresentable
         var lastAppliedRevision: Int?
         var lastFocused: Bool?
+        var lastAppliedAlignment: NSTextAlignment?
         private var revisionCancellable: AnyCancellable?
         // AppKit echoes programmatic text/selection swaps back as delegate
         // callbacks; publishing those would mutate the model mid-view-update.
@@ -448,7 +528,15 @@ struct NSTextViewRepresentable: NSViewRepresentable {
 
         func apply(content: NSAttributedString, revision: Int, to textView: CellTextView) {
             lastAppliedRevision = revision
-            guard !(textView.textStorage?.isEqual(to: content) ?? false) else { return }
+            // The storage carries the view-layer paragraph style but the model's
+            // content is style-free, so compare with the style stripped to avoid
+            // a swap (and IME-interrupting reset) on every revision bump.
+            let current = textView.textStorage ?? NSAttributedString()
+            if Self.strippingParagraphStyle(current).isEqual(to: content) {
+                // Text unchanged; the alignment may still have changed.
+                applyAlignmentIfNeeded(to: textView)
+                return
+            }
             let savedSelection = textView.selectedRanges
             applyingProgrammaticContent = true
             textView.textStorage?.setAttributedString(content)
@@ -460,13 +548,52 @@ struct NSTextViewRepresentable: NSViewRepresentable {
             }
             textView.selectedRanges = selection
             applyingProgrammaticContent = false
+            // The swap reset the stored style; re-apply the cell's alignment.
+            applyAlignment(to: textView)
+        }
+
+        /// Writes the alignment into the storage (render + the source a
+        /// selection re-sync reads) and typingAttributes (typed text before a
+        /// re-sync fires).
+        func applyAlignment(to textView: NSTextView) {
+            lastAppliedAlignment = parent.textAlignment
+            guard let storage = textView.textStorage else { return }
+            let style = NSMutableParagraphStyle()
+            style.alignment = parent.textAlignment
+            if storage.length > 0 {
+                // addAttribute, not setAttributes: the latter replaces the whole
+                // attribute dict and would wipe .foregroundColor (labelColor),
+                // turning the text black in dark mode.
+                storage.addAttribute(.paragraphStyle, value: style,
+                                     range: NSRange(location: 0, length: storage.length))
+            }
+            var ta = textView.typingAttributes
+            ta[.paragraphStyle] = style
+            textView.typingAttributes = ta
+        }
+
+        /// Re-applies the alignment only when it changed since the last write.
+        func applyAlignmentIfNeeded(to textView: NSTextView) {
+            guard parent.textAlignment != lastAppliedAlignment else { return }
+            applyAlignment(to: textView)
+        }
+
+        /// A copy without .paragraphStyle, so equality checks ignore the
+        /// view-layer alignment (the model's content is style-free).
+        static func strippingParagraphStyle(_ s: NSAttributedString) -> NSAttributedString {
+            guard s.length > 0 else { return s }
+            let copy = NSMutableAttributedString(attributedString: s)
+            copy.removeAttribute(.paragraphStyle, range: NSRange(location: 0, length: s.length))
+            return copy
         }
 
         func textDidChange(_ notification: Notification) {
             guard !applyingProgrammaticContent else { return }
             guard let textView = notification.object as? NSTextView,
                   let storage = textView.textStorage else { return }
-            parent.onTextChange(NSAttributedString(attributedString: storage))
+            // Keep the model's content style-free; alignment lives in
+            // cell.alignment, not in the content's paragraph style.
+            parent.onTextChange(Self.strippingParagraphStyle(NSAttributedString(attributedString: storage)))
             refreshDecorations(textView)
         }
 

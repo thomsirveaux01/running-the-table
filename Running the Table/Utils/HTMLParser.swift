@@ -25,6 +25,12 @@ enum HTMLParser {
     private static let anyTagPattern = try! NSRegularExpression(pattern: "(?is)<[^>]*>")
     private static let hrefPattern = try! NSRegularExpression(pattern: "(?i)href\\s*=\\s*(?:\"([^\"]*)\"|'([^']*)'|([^\\s>]+))")
     private static let entityPattern = try! NSRegularExpression(pattern: "&(#x[0-9a-fA-F]+|#[0-9]+|[a-zA-Z][a-zA-Z0-9]*);")
+    // The style attribute, wherever it sits in the attribute text.
+    private static let styleAttributePattern =
+        try! NSRegularExpression(pattern: "(?i)style\\s*=\\s*(?:\"([^\"]*)\"|'([^']*)'|([^\\s>]+))")
+    // A text-align declaration, value running to the next semicolon.
+    private static let textAlignPattern =
+        try! NSRegularExpression(pattern: "(?i)\\btext-align\\s*:\\s*([^;]+)")
 
     // MARK: - Tokens
 
@@ -184,6 +190,80 @@ enum HTMLParser {
         }
         pieces.append(ns.substring(from: last))
         return pieces.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// The value of a cell's style attribute, unquoted and empty when there
+    /// is none.
+    private static func styleValue(in attrText: String) -> String {
+        let ns = attrText as NSString
+        guard let match = styleAttributePattern.firstMatch(in: attrText,
+                                                           range: NSRange(location: 0, length: ns.length)) else { return "" }
+        for groupIndex in 1...3 {
+            let range = match.range(at: groupIndex)
+            guard range.location != NSNotFound else { continue }
+            let value = ns.substring(with: range)
+            if value.count >= 2, value.first == value.last, "\"'".contains(value.first!) {
+                return String(value.dropFirst().dropLast())
+            }
+            return value
+        }
+        return ""
+    }
+
+    /// The NSTextAlignment a `text-align` style value means; the grid offers
+    /// left, center and right, so anything else defaults to left.
+    private static func alignment(from value: String) -> NSTextAlignment {
+        switch value.lowercased() {
+        case "left": return .left
+        case "center": return .center
+        case "right": return .right
+        default: return .left
+        }
+    }
+
+    /// Pulls the `text-align` declaration out of a cell's verbatim attribute
+    /// text and returns the rest, untouched; the model owns alignment, the
+    /// author's other declarations ride verbatim. An empty style leaves the
+    /// whole attribute gone so the markup never carries `style=""`.
+    private static func extractAlignment(from attrText: String) -> (attributes: String,
+                                                                     alignment: NSTextAlignment) {
+        let ns = attrText as NSString
+        guard let styleMatch = styleAttributePattern.firstMatch(in: attrText,
+                                                                range: NSRange(location: 0, length: ns.length)) else {
+            return (attrText.trimmingCharacters(in: .whitespacesAndNewlines), .left)
+        }
+        let styleValue = Self.styleValue(in: attrText)
+        guard let alignMatch = textAlignPattern.firstMatch(in: styleValue,
+                                                           range: NSRange(location: 0, length: styleValue.count)) else {
+            return (attrText.trimmingCharacters(in: .whitespacesAndNewlines), .left)
+        }
+        let declRange = alignMatch.range
+        // Group 1 is the declaration's value, running to the next semicolon.
+        let rawValue = (styleValue as NSString).substring(with: alignMatch.range(at: 1)).trimmingCharacters(in: .whitespaces)
+        let alignment = Self.alignment(from: rawValue)
+        // Drop the declaration from the style value; keep the remaining
+        // declarations (never a stray semicolon) and the rest of the text.
+        let sv = styleValue as NSString
+        let remainingStyle = sv.substring(with: NSRange(location: 0, length: declRange.location))
+            + sv.substring(with: NSRange(location: declRange.location + declRange.length,
+                                         length: sv.length - declRange.location - declRange.length))
+        // Drop the removed declaration and any stray semicolons.
+        let remaining = remainingStyle
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .components(separatedBy: ";")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: "; ")
+        if remaining.isEmpty {
+            let before = ns.substring(with: NSRange(location: 0, length: styleMatch.range.location))
+            let after = ns.substring(with: NSRange(location: styleMatch.range.location + styleMatch.range.length,
+                                                  length: ns.length - styleMatch.range.location - styleMatch.range.length))
+            return (before + after, alignment)
+        }
+        let before = ns.substring(with: NSRange(location: 0, length: styleMatch.range.location))
+        let after = ns.substring(with: NSRange(location: styleMatch.range.location + styleMatch.range.length,
+                                              length: ns.length - styleMatch.range.location - styleMatch.range.length))
+        return (before + "style=\"\(remaining)\"" + after, alignment)
     }
 
     private static func intValue(_ attributes: [HTMLAttribute], _ name: String, default fallback: Int) -> Int {
@@ -363,11 +443,15 @@ enum HTMLParser {
         let colspan = intValue(pairs, "colspan", default: 1)
         let rowspan = intValue(pairs, "rowspan", default: 1)
         let rawAttrs = rawAttributes(in: t.attributeText, removing: ["colspan", "rowspan"])
+        // The model owns the cell's text-align: pull it out of the author's
+        // style so the generator can re-emit it, leaving the rest verbatim.
+        let (styleAttrs, alignment) = extractAlignment(from: rawAttrs)
 
         var next = index + 1
         if t.selfClosing {
             cells.append(TableCell(content: NSAttributedString(), colspan: colspan, rowspan: rowspan,
-                                   isHeader: t.name == "th", rawAttributes: rawAttrs, rawInnerHTML: ""))
+                                   isHeader: t.name == "th", alignment: alignment,
+                                   rawAttributes: styleAttrs, rawInnerHTML: ""))
             return next
         }
         let innerStart = t.range.location + t.range.length
@@ -404,7 +488,8 @@ enum HTMLParser {
                                                   length: max((innerEnd ?? ns.length) - innerStart, 0)))
         cells.append(TableCell(content: attributed(fromFragment: rawInner),
                                colspan: colspan, rowspan: rowspan,
-                               isHeader: t.name == "th", rawAttributes: rawAttrs,
+                               isHeader: t.name == "th", alignment: alignment,
+                               rawAttributes: styleAttrs,
                                rawInnerHTML: rawInner))
         return next
     }

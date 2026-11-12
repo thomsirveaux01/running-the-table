@@ -105,6 +105,28 @@ struct EditorView: View {
             .help("Toggle header cell (Cmd+Shift+H)")
         }
 
+        // The align control is its own drop-down pill: a Menu inside the group
+        // above would split that pill (measured), so it stands alone here.
+        ToolbarItem(placement: .automatic) {
+            Menu {
+                ForEach([NSTextAlignment.left, .center, .right], id: \.self) { alignment in
+                    Button {
+                        viewModel.setAlignment(alignment)
+                    } label: {
+                        if viewModel.alignment == alignment {
+                            Label(alignment.menuTitle, systemImage: "checkmark")
+                        } else {
+                            Label(alignment.menuTitle, systemImage: alignment.iconName)
+                        }
+                    }
+                }
+            } label: {
+                Image(systemName: viewModel.alignment.iconName)
+            }
+            .help("Text alignment of the focused cell (left, center, right)")
+            .accessibilityLabel("Align")
+        }
+
         if #available(macOS 26.0, *) {
             ToolbarSpacer(.fixed, placement: .automatic)
         }
@@ -133,27 +155,8 @@ struct EditorView: View {
             }
             .help("Remove focused column (Cmd+Option+Shift+C)")
         }
-
-        // A Menu, not a Picker: shows the word "colspan" instead of the
-        // selected value (the chevron comes free).
-        ToolbarItemGroup(placement: .automatic) {
-            Menu {
-                ForEach(TableCell.minColspan...TableCell.maxColspan, id: \.self) { span in
-                    Button {
-                        viewModel.colspanBinding.wrappedValue = span
-                    } label: {
-                        if viewModel.colspanBinding.wrappedValue == span {
-                            Label("\(span)", systemImage: "checkmark")
-                        } else {
-                            Text("\(span)")
-                        }
-                    }
-                }
-            } label: {
-                Self.labelImage("colspan", width: 56)
-            }
-            .help("Column span of the focused cell (1-6)")
-        }
+        // colspan left the toolbar: it lives in the Format menu and the cell's
+        // right-click menu (a Menu here would claim its own pill anyway).
     }
 
     private var linkSheet: some View {

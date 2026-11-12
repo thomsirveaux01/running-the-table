@@ -1,6 +1,10 @@
 import AppKit
 
 enum HTMLGenerator {
+    // The style attribute, wherever it sits in the cell's attribute text.
+    private static let styleAttributePattern =
+        try! NSRegularExpression(pattern: "(?i)style\\s*=\\s*(?:\"([^\"]*)\"|'([^']*)'|([^\\s>]+))")
+
     static func html(for table: Table) -> String {
         var attrs = ""
         for attribute in table.attributes {
@@ -32,7 +36,24 @@ enum HTMLGenerator {
                     var cellAttrs = ""
                     if cell.colspan > 1 { cellAttrs += " colspan=\"\(cell.colspan)\"" }
                     if cell.rowspan > 1 { cellAttrs += " rowspan=\"\(cell.rowspan)\"" }
-                    if !cell.rawAttributes.isEmpty { cellAttrs += " " + cell.rawAttributes }
+                    // Alignment is the model's own: it rides in the cell's style
+                    // attribute, which the parser stripped of the declaration.
+                    let attrs = cell.alignment != .left
+                        ? Self.mergeAlignment(cell.rawAttributes, alignment: cell.alignment)
+                        : cell.rawAttributes
+                    if !attrs.isEmpty { cellAttrs += " " + attrs }
+                    // Scope rides the row section: a head row's <th> is a
+                    // column header, any other <th> is a row header.
+                    if table.accessibilityScope && cell.isHeader {
+                        cellAttrs += " scope=\"\(row.section == .head ? "col" : "row")\""
+                    }
+                    // Empty cells inside a merged region need SR-only text so
+                    // screen readers do not read them as silent blanks.
+                    if table.accessibilitySRText,
+                       cell.content.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                       cell.colspan > 1 || cell.rowspan > 1 {
+                        cellAttrs += " aria-label=\"Empty cell\""
+                    }
                     // Unedited cells re-emit their parsed interior byte-exact;
                     // content is only converted after the user touches it.
                     let inner = cell.rawInnerHTML ?? attributedToHTML(cell.content)
@@ -76,5 +97,40 @@ enum HTMLGenerator {
 
     static func escapeAttribute(_ string: String) -> String {
         escapeHTML(string).replacingOccurrences(of: "\"", with: "&quot;")
+    }
+
+    /// The model owns the cell's text-align; the author's declarations ride
+    /// verbatim in the attribute text, so the declaration is merged into the
+    /// existing style attribute (or created when the author left it out).
+    private static func mergeAlignment(_ attrs: String, alignment: NSTextAlignment) -> String {
+        guard alignment != .left else { return attrs }
+        let value = alignment.htmlName
+        let ns = attrs as NSString
+        guard let styleMatch = styleAttributePattern.firstMatch(in: attrs,
+                                                                range: NSRange(location: 0, length: ns.length)) else {
+            return attrs.isEmpty ? "style=\"text-align: \(value)\"" : attrs + " style=\"text-align: \(value)\""
+        }
+        let styleValue = styleValue(from: styleMatch, in: attrs)
+        let updated = styleValue + (styleValue.isEmpty ? "" : ";") + "text-align: \(value)"
+        let before = ns.substring(with: NSRange(location: 0, length: styleMatch.range.location))
+        let after = ns.substring(with: NSRange(location: styleMatch.range.location + styleMatch.range.length,
+                                              length: ns.length - styleMatch.range.location - styleMatch.range.length))
+        return before + "style=\"\(updated)\"" + after
+    }
+
+    /// The value of a style attribute in an attribute string, unquoted and
+    /// empty when there is none.
+    private static func styleValue(from match: NSTextCheckingResult, in text: String) -> String {
+        let ns = text as NSString
+        for groupIndex in 1...3 {
+            let range = match.range(at: groupIndex)
+            guard range.location != NSNotFound else { continue }
+            let value = ns.substring(with: range)
+            if value.count >= 2, value.first == value.last, "\"'".contains(value.first!) {
+                return String(value.dropFirst().dropLast())
+            }
+            return value
+        }
+        return ""
     }
 }

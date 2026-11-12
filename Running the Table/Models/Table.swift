@@ -18,6 +18,11 @@ struct Table {
     /// boilerplate, style blocks, even extra tables survive WYSIWYG edits.
     var sourcePrefix: String = ""
     var sourceSuffix: String = ""
+    /// Accessibility emission toggles: scope on header cells and SR-only
+    /// text on empty merged cells. Only markup the grid generates carries
+    /// them; verbatim attributes from a parse always ride through.
+    var accessibilityScope: Bool = false
+    var accessibilitySRText: Bool = false
     /// Parse notes for markup that could not be honored; transient (never
     /// exported) but travels with the loaded table to reach the HTML pane.
     var diagnostics: [String] = []
@@ -235,6 +240,8 @@ struct Table {
         copy.columnMarkup = columnMarkup
         copy.sourcePrefix = sourcePrefix
         copy.sourceSuffix = sourceSuffix
+        copy.accessibilityScope = accessibilityScope
+        copy.accessibilitySRText = accessibilitySRText
         copy.diagnostics = diagnostics
         return copy
     }

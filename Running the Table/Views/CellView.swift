@@ -28,6 +28,7 @@ struct CellView: View {
                 revision: viewModel.$contentRevision.eraseToAnyPublisher(),
                 contentProvider: { viewModel.cell(row: row, col: col)?.content ?? NSAttributedString() },
                 isHeader: cell.isHeader,
+                textAlignment: cell.alignment,
                 undoManager: viewModel.undoManager,
                 flushPendingEdits: { viewModel.closeTypingGroup() },
                 onTextChange: { viewModel.updateCellContent(row: row, col: col, $0) },
@@ -50,7 +51,9 @@ struct CellView: View {
                 visualCellAt: visualCellAt,
                 cellRangeHandler: { viewModel.cellSelection = $0 },
                 copyCells: { viewModel.copySelectedCells() },
-                pasteTable: { viewModel.pasteTableFromPasteboardIfTable() }
+                pasteTable: { viewModel.pasteTableFromPasteboardIfTable() },
+                colspanCurrent: { viewModel.cell(row: row, col: col)?.colspan ?? 1 },
+                colspanSet: { span in viewModel.setColspan(span, for: GridCell(row: row, column: col)) }
             )
             .frame(width: width, height: height)
             // The selection border is one rectangle over the whole grid

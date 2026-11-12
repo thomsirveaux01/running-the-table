@@ -41,6 +41,16 @@ struct TableAttributesSheet: View {
 
             Button("Add Attribute") { viewModel.addAttributeRow() }
 
+            Divider()
+
+            Text("Accessibility")
+                .font(.headline)
+            Toggle("Add scope to header cells", isOn: $viewModel.accessibilityScope)
+                .help("Emit scope=\"col\" on head rows, scope=\"row\" on other <th> cells")
+            Toggle("Add screen-reader text to empty merged cells",
+                   isOn: $viewModel.accessibilitySRText)
+                .help("Emit aria-label on empty cells that span columns or rows")
+
             HStack {
                 Spacer()
                 Button("Cancel") { viewModel.cancelTableAttributes() }

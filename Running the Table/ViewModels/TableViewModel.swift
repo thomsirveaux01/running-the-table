@@ -711,14 +711,73 @@ final class TableViewModel: ObservableObject {
     }
 
     func setColspan(_ value: Int) {
-        guard let f = focusedCell, let c = cell(row: f.row, col: f.column), c.colspan != value else { return }
+        guard let f = focusedCell else { return }
+        setColspan(value, for: f)
+    }
+
+    /// Cell-specific variant for the context menu, which acts on the
+    /// right-clicked cell (like the row/column commands) rather than the focus.
+    func setColspan(_ value: Int, for cell: GridCell) {
+        guard let c = self.cell(row: cell.row, col: cell.column), c.colspan != value else { return }
         performUndoable("Set Column Span") {
-            self.table.rows[f.row][f.column].colspan = value
+            self.applyColspan(Table.clampedSpan(value), to: cell)
             // The wider cell may still overflow the current height.
-            self.growRowIfNeeded(f.row)
+            self.growRowIfNeeded(cell.row)
+            // The span may have grown the table (new column widths) or padded
+            // a header row with a plain cell (losing its <thead>).
+            self.ensureSizing()
+            self.demoteNonHeaderRows()
+            // A context-menu span can swallow the focused cell.
+            self.keepFocusValid()
             self.flushToDocument()
             self.regenerateHTML()
         }
+    }
+
+    /// Extending a span destroys the cells it swallows, content and all;
+    /// shrinking it — or extending past the table's edge — pads the row, and
+    /// every other row when the table grows, with fresh empty cells so the
+    /// grid stays rectangular.
+    private func applyColspan(_ span: Int, to cell: GridCell) {
+        guard let p = placement(of: cell) else { return }
+        let end = p.startCol + span
+        // Swallowed cells: this row's own cells, after the target, whose
+        // visual start falls inside the new span. Placements run in array
+        // order, so remove from the back to keep indices valid.
+        let doomed = table.placements()[cell.row]
+            .filter { $0.cellIndex > cell.column && $0.startCol < end }
+            .map(\.cellIndex)
+        for index in doomed.reversed() {
+            table.rows[cell.row].remove(at: index)
+        }
+        table.rows[cell.row][cell.column].colspan = span
+        // Pads the row (and, when the span widened the table, every row) back
+        // to full width; also trims anything left overfull.
+        table.normalize()
+    }
+
+    func setAlignment(_ alignment: NSTextAlignment) {
+        let targets = formattingCells()
+        guard !targets.isEmpty else { return }
+        // Nothing to do when every targeted cell already carries the value.
+        guard targets.contains(where: { cell(row: $0.row, col: $0.col)?.alignment != alignment }) else { return }
+        performUndoable("Set Alignment") {
+            for t in targets {
+                self.table.rows[t.row][t.col].alignment = alignment
+            }
+            self.flushToDocument()
+            self.regenerateHTML()
+        }
+    }
+
+    /// The alignment of the focused cell, or of every slot intersecting a
+    /// multi-cell selection; a mixed selection reports the default so the
+    /// toolbar button never lies.
+    var alignment: NSTextAlignment {
+        let targets = formattingCells()
+        guard !targets.isEmpty else { return .left }
+        let values = Set(targets.compactMap { cell(row: $0.row, col: $0.col)?.alignment })
+        return values.count == 1 ? values.first ?? .left : .left
     }
 
     var colspanBinding: Binding<Int> {
@@ -902,11 +961,17 @@ final class TableViewModel: ObservableObject {
 
     @Published var showTableAttributes = false
     @Published var attributesDraft: [HTMLAttribute] = []
+    /// Accessibility emission toggles, mirrored from the table when the
+    /// sheet opens and written back on commit (an undoable attribute edit).
+    @Published var accessibilityScope: Bool = false
+    @Published var accessibilitySRText: Bool = false
 
     func beginTableAttributes() {
         flushToDocument()
         // The title has its own dialog; the sheet owns everything else.
         attributesDraft = table.attributes
+        accessibilityScope = table.accessibilityScope
+        accessibilitySRText = table.accessibilitySRText
         showTableAttributes = true
     }
 
@@ -934,9 +999,12 @@ final class TableViewModel: ObservableObject {
                 cleaned.append(HTMLAttribute(name: name, value: attribute.value))
             }
         }
-        guard cleaned != table.attributes else { return }
+        guard cleaned != table.attributes || accessibilityScope != table.accessibilityScope
+            || accessibilitySRText != table.accessibilitySRText else { return }
         performUndoable("Edit Table Attributes") {
             self.table.attributes = cleaned
+            self.table.accessibilityScope = self.accessibilityScope
+            self.table.accessibilitySRText = self.accessibilitySRText
             self.flushToDocument()
             self.regenerateHTML()
         }
