@@ -112,16 +112,38 @@ final class CellTextView: NSTextView, NSMenuDelegate {
     }
 
     override func setFrameSize(_ newSize: NSSize) {
-        super.setFrameSize(newSize)
-        // widthTracksTextView leaves the container wider than the clip on the
-        // user's Sequoia build (center shifts right, right-align goes off-screen).
+        var size = newSize
+        // No horizontal scrolling: the document view's width IS the clip's.
+        // On the user's Sequoia build the frame comes out wider (center shifts
+        // right, right-align lands off-screen), so pin it, not just the container.
+        if let clip = enclosingScrollView?.contentView, clip.bounds.width > 0,
+           abs(size.width - clip.bounds.width) > 0.5 {
+            size.width = clip.bounds.width
+        }
+        super.setFrameSize(size)
         syncContainerWidth()
     }
 
-    /// Pins the container to the visible width; a size change invalidates the
-    /// layout manager's layout for the container automatically.
+    override func setFrameOrigin(_ newOrigin: NSPoint) {
+        var origin = newOrigin
+        // No horizontal scrolling: the document view sits at the clip's left
+        // edge. On Sequoia the origin drifts negative and every alignment
+        // hangs off the left of the cell.
+        if enclosingScrollView != nil, origin.x < -0.5 {
+            origin.x = 0
+        }
+        super.setFrameOrigin(origin)
+    }
+
+    /// Pins the container to the visible width and clears any horizontal clip
+    /// offset; a container size change invalidates the layout automatically.
     func syncContainerWidth() {
         guard let container = textContainer else { return }
+        // A non-zero clip x-offset shifts every alignment left (Sequoia); with
+        // no horizontal scroll it must be zero.
+        if let clip = enclosingScrollView?.contentView, abs(clip.bounds.origin.x) > 0.5 {
+            clip.bounds.origin.x = 0
+        }
         let target = visibleLayoutWidth
         guard abs(container.size.width - target) > 0.5 else { return }
         container.size = NSSize(width: target, height: container.size.height)
