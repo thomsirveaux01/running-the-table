@@ -104,6 +104,29 @@ final class CellTextView: NSTextView, NSMenuDelegate {
         super.keyDown(with: event)
     }
 
+    /// Layout width: the clip's bounds when scrolled, else our bounds, minus
+    /// the horizontal inset.
+    var visibleLayoutWidth: CGFloat {
+        let base = enclosingScrollView?.contentView.bounds.width ?? bounds.width
+        return max(base - 2 * textContainerInset.width, 1)
+    }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        // widthTracksTextView leaves the container wider than the clip on the
+        // user's Sequoia build (center shifts right, right-align goes off-screen).
+        syncContainerWidth()
+    }
+
+    /// Pins the container to the visible width; a size change invalidates the
+    /// layout manager's layout for the container automatically.
+    func syncContainerWidth() {
+        guard let container = textContainer else { return }
+        let target = visibleLayoutWidth
+        guard abs(container.size.width - target) > 0.5 else { return }
+        container.size = NSSize(width: target, height: container.size.height)
+    }
+
     override func mouseDown(with event: NSEvent) {
         guard gridVisualOrigin != nil else {
             super.mouseDown(with: event)
@@ -573,8 +596,11 @@ struct NSTextViewRepresentable: NSViewRepresentable {
         /// Writes the alignment into the storage (render + the source a
         /// selection re-sync reads) and typingAttributes (typed text before a
         /// re-sync fires).
-        func applyAlignment(to textView: NSTextView) {
+        func applyAlignment(to textView: CellTextView) {
             lastAppliedAlignment = parent.textAlignment
+            // Re-pin the layout width where alignment is (re)applied, so a
+            // stale container can't misplace the render.
+            textView.syncContainerWidth()
             guard let storage = textView.textStorage else { return }
             let style = NSMutableParagraphStyle()
             style.alignment = parent.textAlignment
@@ -591,7 +617,7 @@ struct NSTextViewRepresentable: NSViewRepresentable {
         }
 
         /// Re-applies the alignment only when it changed since the last write.
-        func applyAlignmentIfNeeded(to textView: NSTextView) {
+        func applyAlignmentIfNeeded(to textView: CellTextView) {
             guard parent.textAlignment != lastAppliedAlignment else { return }
             applyAlignment(to: textView)
         }
