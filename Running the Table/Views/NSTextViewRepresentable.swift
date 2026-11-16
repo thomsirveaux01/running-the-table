@@ -104,21 +104,31 @@ final class CellTextView: NSTextView, NSMenuDelegate {
         super.keyDown(with: event)
     }
 
+    /// The HTML pane's line-number ruler claims the clip's left edge through a
+    /// negative bounds origin (measured: {-40, 0} at rest); the width pins must
+    /// leave that strip for the ruler instead of zeroing it.
+    var rulerInset: CGFloat {
+        guard let scroll = enclosingScrollView, scroll.rulersVisible,
+              let ruler = scroll.verticalRulerView else { return 0 }
+        return ruler.ruleThickness
+    }
+
     /// Layout width: the clip's bounds when scrolled, else our bounds, minus
-    /// the horizontal inset.
+    /// the horizontal inset and the ruler strip.
     var visibleLayoutWidth: CGFloat {
         let base = enclosingScrollView?.contentView.bounds.width ?? bounds.width
-        return max(base - 2 * textContainerInset.width, 1)
+        return max(base - 2 * textContainerInset.width - rulerInset, 1)
     }
 
     override func setFrameSize(_ newSize: NSSize) {
         var size = newSize
-        // No horizontal scrolling: the document view's width IS the clip's.
-        // On the user's Sequoia build the frame comes out wider (center shifts
-        // right, right-align lands off-screen), so pin it, not just the container.
-        if let clip = enclosingScrollView?.contentView, clip.bounds.width > 0,
-           abs(size.width - clip.bounds.width) > 0.5 {
-            size.width = clip.bounds.width
+        // No horizontal scrolling: the document view's width IS the clip's
+        // minus the ruler strip. On the user's Sequoia build the frame comes
+        // out wider (center shifts right, right-align lands off-screen), so
+        // pin it, not just the container.
+        if let clip = enclosingScrollView?.contentView, clip.bounds.width > 0 {
+            let target = clip.bounds.width - rulerInset
+            if abs(size.width - target) > 0.5 { size.width = target }
         }
         super.setFrameSize(size)
         syncContainerWidth()
@@ -135,14 +145,19 @@ final class CellTextView: NSTextView, NSMenuDelegate {
         super.setFrameOrigin(origin)
     }
 
-    /// Pins the container to the visible width and clears any horizontal clip
-    /// offset; a container size change invalidates the layout automatically.
+    /// Pins the container to the visible width and the clip's x-offset to the
+    /// ruler strip (zero without one); a container size change invalidates the
+    /// layout automatically.
     func syncContainerWidth() {
         guard let container = textContainer else { return }
-        // A non-zero clip x-offset shifts every alignment left (Sequoia); with
-        // no horizontal scroll it must be zero.
-        if let clip = enclosingScrollView?.contentView, abs(clip.bounds.origin.x) > 0.5 {
-            clip.bounds.origin.x = 0
+        // The ruler strip is a negative clip x-offset (HTML pane); without a
+        // ruler the document must start at the clip's left edge (Sequoia
+        // drifts it otherwise and every alignment shifts left).
+        if let clip = enclosingScrollView?.contentView {
+            let expectedX = -rulerInset
+            if abs(clip.bounds.origin.x - expectedX) > 0.5 {
+                clip.bounds.origin.x = expectedX
+            }
         }
         let target = visibleLayoutWidth
         guard abs(container.size.width - target) > 0.5 else { return }
