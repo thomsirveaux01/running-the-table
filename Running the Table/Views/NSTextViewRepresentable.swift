@@ -71,6 +71,14 @@ final class CellTextView: NSTextView, NSMenuDelegate {
     var keyCommandHandler: ((NSEvent) -> Bool)?
     weak var undoManagerOverride: UndoManager?
     var highlightsCurrentLine = false
+    /// Set only in the pooled grid: the model cell this view currently
+    /// represents (handlers read it at fire time, so a view reused across a
+    /// table switch keeps reporting the right cell) and the focus/separator
+    /// border the old CellView's strokeBorder overlay drew.
+    var modelCell: GridCell?
+    var modelStartCol = 0
+    var gridBorderColor: NSColor?
+    var gridBorderWidth: CGFloat = 1
     /// Drag-selection state, set only in the grid: this slot's visual
     /// rectangle, the grid's point→cell hit-test, and the selection sink.
     var gridVisualOrigin: VisualCell?
@@ -113,10 +121,19 @@ final class CellTextView: NSTextView, NSMenuDelegate {
         return ruler.ruleThickness
     }
 
+    /// True when this text view is its scroll view's document view (the HTML
+    /// pane and the old per-cell wrappers). Pooled grid cells live inside a
+    /// shared document view; pinning them to the grid's clip width would
+    /// clamp every cell to the viewport.
+    var pinsWidthToClip: Bool {
+        guard let scroll = enclosingScrollView else { return false }
+        return scroll.documentView === self
+    }
+
     /// Layout width: the clip's bounds when scrolled, else our bounds, minus
     /// the horizontal inset and the ruler strip.
     var visibleLayoutWidth: CGFloat {
-        let base = enclosingScrollView?.contentView.bounds.width ?? bounds.width
+        let base = pinsWidthToClip ? (enclosingScrollView?.contentView.bounds.width ?? bounds.width) : bounds.width
         return max(base - 2 * textContainerInset.width - rulerInset, 1)
     }
 
@@ -125,8 +142,8 @@ final class CellTextView: NSTextView, NSMenuDelegate {
         // No horizontal scrolling: the document view's width IS the clip's
         // minus the ruler strip. On the user's Sequoia build the frame comes
         // out wider (center shifts right, right-align lands off-screen), so
-        // pin it, not just the container.
-        if let clip = enclosingScrollView?.contentView, clip.bounds.width > 0 {
+        // pin it, not just the container. Grid cells keep their slot width.
+        if pinsWidthToClip, let clip = enclosingScrollView?.contentView, clip.bounds.width > 0 {
             let target = clip.bounds.width - rulerInset
             if abs(size.width - target) > 0.5 { size.width = target }
         }
@@ -149,7 +166,9 @@ final class CellTextView: NSTextView, NSMenuDelegate {
     /// ruler strip (zero without one); a container size change invalidates the
     /// layout automatically.
     func syncContainerWidth() {
-        guard let container = textContainer else { return }
+        // Grid cells track their own frame via widthTracksTextView; the clip
+        // pin exists for the HTML pane and the old per-cell wrappers only.
+        guard pinsWidthToClip, let container = textContainer else { return }
         // The ruler strip is a negative clip x-offset (HTML pane); without a
         // ruler the document must start at the clip's left edge (Sequoia
         // drifts it otherwise and every alignment shifts left).
@@ -234,6 +253,18 @@ final class CellTextView: NSTextView, NSMenuDelegate {
         let accepted = super.becomeFirstResponder()
         if accepted { didBecomeFirstResponderHandler?() }
         return accepted
+    }
+
+    // The grid draws each cell's focus/separator border (the old CellView
+    // strokeBorder overlay) on top of the text's own drawing.
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        guard let color = gridBorderColor else { return }
+        color.setStroke()
+        let half = gridBorderWidth / 2
+        let path = NSBezierPath(rect: bounds.insetBy(dx: half, dy: half))
+        path.lineWidth = gridBorderWidth
+        path.stroke()
     }
 
     // IDE-style band behind the caret's line.
