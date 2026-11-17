@@ -62,10 +62,13 @@ final class GridCoordinator: NSObject, NSTextViewDelegate, NSTextFieldDelegate {
     var rowDrag = GridDragState()
     var columnDrag = GridDragState()
 
-    // Pooled per-cell scroll wrappers keyed by model cell (the text view
-    // inside is the editor; the wrapper keeps the old per-cell mechanics:
-    // clip-width pin, slot-height floor, and in-cell scrolling).
-    var cellViews: [GridCell: NSScrollView] = [:]
+    // Pooled per-cell clip containers keyed by model cell (the editor is
+    // their only subview; the container pins the clip width and floors the
+    // slot height — see GridCellClipView).
+    var cellViews: [GridCell: NSView] = [:]
+    // Editors dropped by a table-shape change ride here instead of being
+    // rebuilt from scratch (TextKit stack + container) on the way back.
+    var spareCells: [NSView] = []
     var lastAppliedRevision: [GridCell: Int] = [:]
     var lastAppliedAlignment: [GridCell: NSTextAlignment] = [:]
     var lastFocused: [GridCell: Bool] = [:]
@@ -90,28 +93,36 @@ final class GridCoordinator: NSObject, NSTextViewDelegate, NSTextFieldDelegate {
 
     // MARK: - Cell content / alignment (mirrors the representable's dual-path apply)
 
-    func apply(content: NSAttributedString, revision: Int, to textView: CellTextView, alignment: NSTextAlignment) {
-        guard let cell = textView.modelCell else { return }
-        guard lastAppliedRevision[cell] != revision else { return }
+    /// Returns whether the write (or an alignment restyle) dirtied the text
+    /// view, so sync() can skip invalidating cells nothing changed.
+    @discardableResult
+    func apply(content: NSAttributedString, revision: Int, to textView: CellTextView, alignment: NSTextAlignment) -> Bool {
+        guard let cell = textView.modelCell else { return false }
+        guard lastAppliedRevision[cell] != revision else { return false }
         lastAppliedRevision[cell] = revision
         // The storage carries the view-layer paragraph style but the model's
         // content is style-free, so compare with the style stripped to avoid
         // a swap (and IME-interrupting reset) on every revision bump.
         let current = textView.textStorage ?? NSAttributedString()
         if NSTextViewRepresentable.Coordinator.strippingParagraphStyle(current).isEqual(to: content) {
-            applyAlignmentIfNeeded(to: textView, alignment: alignment)
-            return
+            return applyAlignmentIfNeeded(to: textView, alignment: alignment)
         }
         let savedSelection = textView.selectedRanges
+        // Selection is only ever visible on the focused editor; restoring it
+        // on the other ~40 cells per switch was pure layout work. Writing
+        // leaves an unfocused editor at location 0, which is invisible.
+        let restoreSelection = textView.window?.firstResponder === textView
         applyingProgrammaticContent = true
         textView.textStorage?.setAttributedString(content)
-        // NSSelectionArray rejects empty arrays (raises, crashes) and
-        // out-of-range values, e.g. after undo empties a cell.
-        var selection = savedSelection.filter { $0.rangeValue.upperBound <= content.length }
-        if selection.isEmpty {
-            selection = [NSValue(range: NSRange(location: content.length, length: 0))]
+        if restoreSelection {
+            // NSSelectionArray rejects empty arrays (raises, crashes) and
+            // out-of-range values, e.g. after undo empties a cell.
+            var selection = savedSelection.filter { $0.rangeValue.upperBound <= content.length }
+            if selection.isEmpty {
+                selection = [NSValue(range: NSRange(location: content.length, length: 0))]
+            }
+            textView.selectedRanges = selection
         }
-        textView.selectedRanges = selection
         applyingProgrammaticContent = false
         // A left-aligned cell needs no write — style-free content already
         // renders left for LTR text — so skip the full-range paragraph-style
@@ -121,6 +132,7 @@ final class GridCoordinator: NSObject, NSTextViewDelegate, NSTextFieldDelegate {
         } else {
             applyAlignment(to: textView, alignment: alignment)
         }
+        return true
     }
 
     func applyAlignment(to textView: CellTextView, alignment: NSTextAlignment) {
@@ -141,9 +153,11 @@ final class GridCoordinator: NSObject, NSTextViewDelegate, NSTextFieldDelegate {
         textView.typingAttributes = ta
     }
 
-    func applyAlignmentIfNeeded(to textView: CellTextView, alignment: NSTextAlignment) {
-        guard let cell = textView.modelCell, lastAppliedAlignment[cell] != alignment else { return }
+    @discardableResult
+    func applyAlignmentIfNeeded(to textView: CellTextView, alignment: NSTextAlignment) -> Bool {
+        guard let cell = textView.modelCell, lastAppliedAlignment[cell] != alignment else { return false }
         applyAlignment(to: textView, alignment: alignment)
+        return true
     }
 
     // MARK: - NSTextViewDelegate (shared across all pooled cells)
@@ -184,6 +198,57 @@ final class GridCoordinator: NSObject, NSTextViewDelegate, NSTextFieldDelegate {
         DispatchQueue.main.async {
             viewModel.updateCellSelection(row: cell.row, col: cell.column, NSRange(location: loc, length: 0))
         }
+    }
+}
+
+/// The cell's clipping container: a plain layer-backed view that pins its
+/// editor to the slot and clips overflow. The per-cell NSScrollView wrapper
+/// it replaces added a scroll view and clip view per cell — tiling,
+/// tracking-area, and wheel machinery the display cycle walked every
+/// toggle — only to be told never to scroll. The wheel now rides the
+/// responder chain from the editor straight up to the grid's scroll view.
+final class GridCellClipView: NSView {
+    override var isFlipped: Bool { true }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        layer?.masksToBounds = true
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        // Setting a frame doesn't imply needsLayout; without this the editor
+        // would keep its old size until something else dirties the layout.
+        needsLayout = true
+    }
+
+    override func layout() {
+        super.layout()
+        guard bounds.width > 0, bounds.height > 0 else { return }
+        // The editor always fills the slot; text taller than the slot is
+        // clipped, which is the cell's whole scrolling story now.
+        subviews.first?.frame = bounds
+    }
+}
+
+/// Move-handle glyphs, cached by tint and appearance: building a configured
+/// SF Symbol inside draw() re-ran CoreSVG instantiation for every handle on
+/// every grid redraw (the profile's biggest display cost). Main-thread only.
+enum MoveHandleSymbol {
+    private static var cache: [String: NSImage] = [:]
+
+    static func image(description: String, tint: NSColor) -> NSImage? {
+        let key = "\(description)|\(tint)|\(NSApp.effectiveAppearance.name.rawValue)"
+        if let hit = cache[key] { return hit }
+        let config = NSImage.SymbolConfiguration(pointSize: 10, weight: .semibold)
+            .applying(NSImage.SymbolConfiguration(paletteColors: [tint]))
+        guard let image = NSImage(systemSymbolName: "line.3.horizontal", accessibilityDescription: description)?
+            .withSymbolConfiguration(config) else { return nil }
+        cache[key] = image
+        return image
     }
 }
 
@@ -233,14 +298,15 @@ final class GridDocumentView: NSView {
             coordinator.lastAppliedRevision[cell] = nil
             coordinator.lastAppliedAlignment[cell] = nil
             coordinator.lastFocused[cell] = nil
+            if coordinator.spareCells.count < 48 { coordinator.spareCells.append(view) }
         }
 
-        var liftedCells: [NSScrollView] = []
+        var liftedCells: [NSView] = []
         for (row, slots) in placements.enumerated() {
             for p in slots {
                 let key = GridCell(row: row, column: p.cellIndex)
                 guard let cell = viewModel.cell(row: row, col: p.cellIndex) else { continue }
-                let scroll: NSScrollView
+                let scroll: NSView
                 if let existing = coordinator.cellViews[key] {
                     scroll = existing
                 } else {
@@ -250,7 +316,7 @@ final class GridDocumentView: NSView {
                 }
                 let slotRect = geom.cellRect(row: row, placement: p, coordinator: coordinator)
                 if scroll.frame != slotRect { scroll.frame = slotRect }
-                guard let textView = scroll.documentView as? CellTextView else { continue }
+                guard let textView = scroll.subviews.first as? CellTextView else { continue }
                 textView.modelCell = key
                 textView.modelStartCol = p.startCol
                 textView.gridVisualOrigin = VisualCell(row: row, column: p.startCol)
@@ -265,18 +331,24 @@ final class GridDocumentView: NSView {
                                                   captionOffset: geom.captionBandHeight)
                 }
                 let background = NSTextViewRepresentable.background(isHeader: cell.isHeader)
-                if !textView.backgroundColor.isEqual(background) {
-                    textView.backgroundColor = background
-                }
-                coordinator.apply(content: cell.content, revision: viewModel.contentRevision,
-                                  to: textView, alignment: cell.alignment)
+                let bgChanged = !textView.backgroundColor.isEqual(background)
+                if bgChanged { textView.backgroundColor = background }
+                let wrote = coordinator.apply(content: cell.content, revision: viewModel.contentRevision,
+                                              to: textView, alignment: cell.alignment)
                 // Per-cell focus border (was CellView's strokeBorder overlay).
                 let focused = viewModel.focusedCell == key
-                textView.gridBorderColor = focused ? .controlAccentColor : .separatorColor
-                textView.gridBorderWidth = focused ? 2 : 1
+                let borderW: CGFloat = focused ? 2 : 1
+                let borderC: NSColor = focused ? .controlAccentColor : .separatorColor
+                let borderChanged = textView.gridBorderWidth != borderW
+                    || !(textView.gridBorderColor?.isEqual(borderC) ?? false)
+                textView.gridBorderColor = borderC
+                textView.gridBorderWidth = borderW
                 let lifted = isLifted(row: row, startCol: p.startCol, coordinator: coordinator)
                 scroll.alphaValue = coordinator.columnDrag.dragged == p.startCol ? 0.5 : 1
-                textView.needsDisplay = true
+                // Only a real change dirties the editor: forcing needsDisplay
+                // on every cell every sync redrew the whole grid per switch
+                // and forced synchronous glyph layout via the dirty-rect math.
+                if wrote || borderChanged || bgChanged { textView.needsDisplay = true }
                 if lifted { liftedCells.append(scroll) }
 
                 // Focus bridge: follow false→true grid moves only when the
@@ -306,12 +378,19 @@ final class GridDocumentView: NSView {
         restoreStackingOrder()
     }
 
-    /// Builds the pooled per-cell wrapper: an NSScrollView whose document is
-    /// the editor, exactly as the old SwiftUI representable made one, so the
-    /// text view's clip-width pin, slot-height floor, and in-cell scrolling
-    /// keep working inside the shared grid scroll view.
+    /// Builds the pooled per-cell container: a plain clipping view whose one
+    /// subview is the editor, pinning the clip width and the slot height;
+    /// the wheel rides the responder chain up to the grid's scroll view.
     @MainActor
-    private func makeCellContainer(key: GridCell, coordinator: GridCoordinator) -> NSScrollView {
+    private func makeCellContainer(key: GridCell, coordinator: GridCoordinator) -> NSView {
+        // A stashed editor re-points as-is: sync resets the modelCell and
+        // spans, apply() re-checks content, and stale revisions were cleared
+        // when the view was dropped.
+        if let spare = coordinator.spareCells.popLast(),
+           let editor = spare.subviews.first as? CellTextView {
+            editor.selectedRanges = [NSValue(range: NSRange(location: 0, length: 0))]
+            return spare
+        }
         // Explicit TextKit 1 stack at creation: touching .layoutManager on a
         // default (TextKit 2) view switches layout systems mid-setup and the
         // layer-backed view then renders blank. Temporary attributes need TK1.
@@ -346,18 +425,13 @@ final class GridDocumentView: NSView {
         textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
         textView.isHorizontallyResizable = false
         textView.isVerticallyResizable = true
-        // The wrapper sizes the document; autoresizing would fight it.
+        // The container sizes the editor; autoresizing would fight it.
         textView.autoresizingMask = []
         textView.textContainer?.widthTracksTextView = true
         wireCell(textView, coordinator: coordinator)
-        let scroll = NSScrollView()
-        scroll.documentView = textView
-        scroll.drawsBackground = false
-        scroll.borderType = .noBorder
-        scroll.hasVerticalScroller = false
-        scroll.hasHorizontalScroller = false
-        scroll.autohidesScrollers = true
-        return scroll
+        let clip = GridCellClipView()
+        clip.addSubview(textView)
+        return clip
     }
 
     /// Handlers read `modelCell` at fire time, so a pooled view that lands on
@@ -675,7 +749,7 @@ final class GridDocumentView: NSView {
                 let base = geom.gridLeftEdge + geom.localColumnLeft(col)
                 animate(strip, fromX: f.origin.x, toX: base + shift, animated: animated)
             }
-            for (_, scroll) in coordinator.cellViews where (scroll.documentView as? CellTextView)?.gridVisualOrigin?.column == col {
+            for (_, scroll) in coordinator.cellViews where (scroll.subviews.first as? CellTextView)?.gridVisualOrigin?.column == col {
                 let f = scroll.frame
                 let baseX = geom.gridLeftEdge + geom.localColumnLeft(col)
                 animate(scroll, fromX: f.origin.x, toX: baseX + shift, animated: animated)
@@ -812,10 +886,7 @@ final class RowMoveHandleView: NSView {
         }
         let color: NSColor = isDragged ? .controlAccentColor
             : NSColor.secondaryLabelColor.withAlphaComponent(hovering ? 0.9 : 0.45)
-        let config = NSImage.SymbolConfiguration(pointSize: 10, weight: .semibold)
-            .applying(NSImage.SymbolConfiguration(paletteColors: [color]))
-        guard let symbol = NSImage(systemSymbolName: "line.3.horizontal", accessibilityDescription: "Move row")?
-            .withSymbolConfiguration(config) else { return }
+        guard let symbol = MoveHandleSymbol.image(description: "Move row", tint: color) else { return }
         let side: CGFloat = 10
         let rect = NSRect(x: (bounds.width - side) / 2, y: (bounds.height - side) / 2,
                           width: side, height: side)
@@ -928,10 +999,7 @@ final class ColumnMoveHandleView: NSView {
         // so the horizontal one turns to stand in.
         let color: NSColor = isDragged ? .controlAccentColor
             : NSColor.secondaryLabelColor.withAlphaComponent(hovering ? 0.9 : 0.45)
-        let config = NSImage.SymbolConfiguration(pointSize: 10, weight: .semibold)
-            .applying(NSImage.SymbolConfiguration(paletteColors: [color]))
-        guard let symbol = NSImage(systemSymbolName: "line.3.horizontal", accessibilityDescription: "Move column")?
-            .withSymbolConfiguration(config) else { return }
+        guard let symbol = MoveHandleSymbol.image(description: "Move column", tint: color) else { return }
         NSGraphicsContext.saveGraphicsState()
         let transform = NSAffineTransform()
         transform.translateX(by: bounds.midX, yBy: bounds.midY)

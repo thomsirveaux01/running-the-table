@@ -138,6 +138,13 @@ final class CellTextView: NSTextView, NSMenuDelegate {
 
     override func setFrameSize(_ newSize: NSSize) {
         var size = newSize
+        // Inside a grid cell the editor IS the cell's paint surface (border
+        // and background), so it fills the slot: TextKit's shrink-to-text
+        // height would clip the cell's paint to the text, and the old
+        // per-cell scroll view's tiling is gone to re-expand it.
+        if let slot = superview as? GridCellClipView, slot.bounds.width > 0, slot.bounds.height > 0 {
+            size = slot.bounds.size
+        }
         // No horizontal scrolling: the document view's width IS the clip's
         // minus the ruler strip. On the user's Sequoia build the frame comes
         // out wider (center shifts right, right-align lands off-screen), so
@@ -166,7 +173,7 @@ final class CellTextView: NSTextView, NSMenuDelegate {
     /// layout automatically.
     func syncContainerWidth() {
         // Grid cells track their own frame via widthTracksTextView; the clip
-        // pin exists for the HTML pane and the old per-cell wrappers only.
+        // pin exists for the HTML pane only.
         guard pinsWidthToClip, let container = textContainer else { return }
         // The ruler strip is a negative clip x-offset (HTML pane); without a
         // ruler the document must start at the clip's left edge (Sequoia
@@ -616,6 +623,12 @@ struct NSTextViewRepresentable: NSViewRepresentable {
         var parent: NSTextViewRepresentable
         var lastFocused: Bool?
         var lastAppliedAlignment: NSTextAlignment?
+        // The regex pass reruns on every pane update, but table switches feed
+        // the identical string back through; caching by text keeps revisits
+        // free. Two slots, least-recently-used: toggling between two tables
+        // misses a single-slot cache every time. (Colors are dynamic NSColors,
+        // so the cache survives appearance changes.)
+        private var cachedRuns: [(text: String, runs: [(NSRange, NSColor)])] = []
         // AppKit echoes programmatic text/selection swaps back as delegate
         // callbacks; publishing those would mutate the model mid-view-update.
         var applyingProgrammaticContent = false
@@ -737,7 +750,17 @@ struct NSTextViewRepresentable: NSViewRepresentable {
                 let ns = textView.string as NSString
                 let full = NSRange(location: 0, length: ns.length)
                 layoutManager.setTemporaryAttributes([:], forCharacterRange: full)
-                for (range, color) in HTMLHighlighter.colorRuns(in: textView.string) {
+                let text = textView.string
+                let runs: [(NSRange, NSColor)]
+                if let hit = cachedRuns.firstIndex(where: { $0.text == text }) {
+                    runs = cachedRuns[hit].runs
+                    if hit != 0 { cachedRuns.swapAt(0, hit) }
+                } else {
+                    runs = HTMLHighlighter.colorRuns(in: text)
+                    cachedRuns.insert((text, runs), at: 0)
+                    if cachedRuns.count > 2 { cachedRuns.removeLast() }
+                }
+                for (range, color) in runs {
                     layoutManager.setTemporaryAttributes([.foregroundColor: color], forCharacterRange: range)
                 }
             }
