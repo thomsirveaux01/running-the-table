@@ -1,5 +1,4 @@
 import AppKit
-import Combine
 import SwiftUI
 
 // NSTextView wrapper (not TextEditor) so this pane shares the cells' undo
@@ -58,8 +57,6 @@ struct HTMLView: View {
             NSTextViewRepresentable(
                 content: htmlContent,
                 contentRevision: viewModel.contentRevision,
-                revision: viewModel.contentRevisionPublisher,
-                contentProvider: { Self.liveContent(viewModel) },
                 isHeader: false,
                 scrolls: true,
                 font: Self.editorFont,
@@ -73,8 +70,7 @@ struct HTMLView: View {
                 },
                 highlightsSyntax: true,
                 showsLineNumbers: true,
-                highlightsCurrentLine: true,
-                defersContent: true
+                highlightsCurrentLine: true
             )
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }

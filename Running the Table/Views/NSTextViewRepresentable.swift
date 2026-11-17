@@ -1,5 +1,4 @@
 import AppKit
-import Combine
 import SwiftUI
 
 /// Row/column edits a cell's context menu offers; the raw value rides along as
@@ -404,22 +403,14 @@ final class CellTextView: NSTextView, NSMenuDelegate {
     }
 }
 
-// Content sync is dual-path by necessity: SwiftUI sometimes skips
-// updateNSView after a model change (observed after undo/redo), so the
-// coordinator also subscribes to the revision publisher and pulls live
-// content. Whichever path fires first applies; the other sees equal text
-// and skips.
+// Content sync is direct: the hosting body reads the model properties the
+// text depends on, so @Observable re-fires updateNSView on every change —
+// undo/redo included (htmlpane_probe guards that contract).
 struct NSTextViewRepresentable: NSViewRepresentable {
     var content: NSAttributedString
-    /// Text is re-applied only on revision bumps, so a stale render pass
-    /// can't revert text the user just typed.
+    /// Render key: the pane's body reads the model's revision, so any bump
+    /// re-fires updateNSView; apply()'s equality check protects live typing.
     var contentRevision: Int
-    /// Only the HTML pane subscribes (its apply is deferred a turn); grid
-    /// cells pass nil and apply exclusively from updateNSView, so one
-    /// revision bump can't enqueue a per-cell main-queue block for 500 cells.
-    var revision: AnyPublisher<Int, Never>?
-    /// Live read from the view model — never a render-time snapshot.
-    var contentProvider: () -> NSAttributedString
     var isHeader: Bool
     /// The cell's alignment; the macOS 27 SDK has no NSTextView.textAlignment,
     /// so it is rendered as a paragraph style written into the storage.
@@ -441,10 +432,6 @@ struct NSTextViewRepresentable: NSViewRepresentable {
     var highlightsSyntax = false
     var showsLineNumbers = false
     var highlightsCurrentLine = false
-    /// The source pane lands its content one turn after the grid's, so a
-    /// document switch doesn't pay its full re-layout in the same frame as
-    /// the grid's. Cell views are always false.
-    var defersContent = false
     /// Row/column commands for the context menu; nil outside the grid.
     var cellCommands: ((CellCommand) -> Void)? = nil
     /// Greys out a context-menu command the cell can't run; nil = all enabled.
@@ -550,9 +537,7 @@ struct NSTextViewRepresentable: NSViewRepresentable {
         }
 
         wire(textView: textView, coordinator: context.coordinator)
-        context.coordinator.lastAppliedRevision = contentRevision
         context.coordinator.lastFocused = isFocused
-        if let revision { context.coordinator.observeRevision(revision, textView: textView) }
         context.coordinator.refreshDecorations(textView)
         return scrollView
     }
@@ -561,13 +546,9 @@ struct NSTextViewRepresentable: NSViewRepresentable {
         context.coordinator.parent = self
         guard let textView = scrollView.documentView as? CellTextView else { return }
         wire(textView: textView, coordinator: context.coordinator)
-        if context.coordinator.lastAppliedRevision != contentRevision, !defersContent {
-            // The deferred pane applies on the next turn instead, so its
-            // re-layout doesn't land in the grid's frame.
-            context.coordinator.apply(content: content, revision: contentRevision, to: textView)
-        }
-        // apply() skips the write when the text is unchanged, so the
-        // alignment is re-checked here where `parent` is guaranteed fresh.
+        // @Observable re-fires this on every model change, so the pane
+        // applies directly; apply() skips the write when the text is equal.
+        context.coordinator.apply(content: content, to: textView)
         context.coordinator.applyAlignmentIfNeeded(to: textView)
 
         // Focus bridge: follow false→true grid moves only when the keyboard
@@ -591,12 +572,7 @@ struct NSTextViewRepresentable: NSViewRepresentable {
         if !textView.backgroundColor.isEqual(Self.background(isHeader: isHeader)) {
             textView.backgroundColor = Self.background(isHeader: isHeader)
         }
-        // The deferred pane's text only changes via the revision timer, which
-        // decorates right after applying; a syntax pass over the still-stale
-        // text here would burn ~20 ms per switch for nothing.
-        if !defersContent {
-            context.coordinator.refreshDecorations(textView)
-        }
+        context.coordinator.refreshDecorations(textView)
     }
 
     private func wire(textView: CellTextView, coordinator: Coordinator) {
@@ -638,10 +614,8 @@ struct NSTextViewRepresentable: NSViewRepresentable {
 
     final class Coordinator: NSObject, NSTextViewDelegate {
         var parent: NSTextViewRepresentable
-        var lastAppliedRevision: Int?
         var lastFocused: Bool?
         var lastAppliedAlignment: NSTextAlignment?
-        private var revisionCancellable: AnyCancellable?
         // AppKit echoes programmatic text/selection swaps back as delegate
         // callbacks; publishing those would mutate the model mid-view-update.
         var applyingProgrammaticContent = false
@@ -650,30 +624,7 @@ struct NSTextViewRepresentable: NSViewRepresentable {
             self.parent = parent
         }
 
-        func observeRevision(_ publisher: AnyPublisher<Int, Never>, textView: CellTextView) {
-            revisionCancellable = publisher
-                .receive(on: DispatchQueue.main)
-                .sink { [weak self, weak textView] revision in
-                    guard let self, let textView else { return }
-                    guard self.lastAppliedRevision != revision else { return }
-                    if self.parent.defersContent {
-                        // Land on the next turn, after the grid's frame has
-                        // drawn, so a document switch doesn't put this pane's
-                        // full re-layout in the same frame as the grid's.
-                        let timer = Timer(timeInterval: 0, repeats: false) { [weak self, weak textView] _ in
-                            guard let self, let textView, self.lastAppliedRevision != revision else { return }
-                            self.apply(content: self.parent.contentProvider(), revision: revision, to: textView)
-                            self.refreshDecorations(textView)
-                        }
-                        RunLoop.main.add(timer, forMode: .common)
-                    } else {
-                        self.apply(content: self.parent.contentProvider(), revision: revision, to: textView)
-                    }
-                }
-        }
-
-        func apply(content: NSAttributedString, revision: Int, to textView: CellTextView) {
-            lastAppliedRevision = revision
+        func apply(content: NSAttributedString, to textView: CellTextView) {
             // The storage carries the view-layer paragraph style but the model's
             // content is style-free, so compare with the style stripped to avoid
             // a swap (and IME-interrupting reset) on every revision bump.

@@ -1,5 +1,4 @@
 import AppKit
-import Combine
 import Observation
 import SwiftUI
 
@@ -49,15 +48,9 @@ final class TableViewModel {
     /// The sidebar's ⌘-click set; the editor follows its last-clicked table.
     var sidebarSelection: Set<UUID> = []
     var table: Table
-    // Text views re-apply content only on revision bumps, so a stale render
-    // can't revert text the user just typed. The didSet drives the HTML
-    // pane's subscription (grid cells apply via their own refresh path).
-    private(set) var contentRevision = 0 {
-        didSet { revisionSubject.send(contentRevision) }
-    }
-    @ObservationIgnored
-    private let revisionSubject = PassthroughSubject<Int, Never>()
-    var contentRevisionPublisher: AnyPublisher<Int, Never> { revisionSubject.eraseToAnyPublisher() }
+    // Bumped on every content mutation; the HTML pane's body reads it, so a
+    // bump reliably re-fires its updateNSView (apply() skips unchanged text).
+    private(set) var contentRevision = 0
 
     var htmlText: String = ""
     var focusedCell: GridCell? {
