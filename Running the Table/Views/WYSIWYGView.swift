@@ -137,6 +137,11 @@ struct WYSIWYGView: View {
 
     /// Height of a cell that towers over `rowSpan` rows, dividers included.
     private func cellHeight(row: Int, rowSpan: Int) -> CGFloat {
+        // @Observable partial invalidation can re-run a removed slot's content
+        // closure with its captured row index against the new table's heights
+        // (measured switching 6-row → 1-row tables), so bound it like the
+        // other index-keyed reads here.
+        guard row < viewModel.rowHeights.count else { return TableViewModel.defaultRowHeight }
         var height = CGFloat(max(rowSpan - 1, 0)) * Self.divider
         for spanned in row..<min(row + rowSpan, viewModel.rowHeights.count) {
             height += rowHeight(spanned)

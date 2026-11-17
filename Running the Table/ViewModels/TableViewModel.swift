@@ -347,12 +347,17 @@ final class TableViewModel {
     }
 
     func updateCellSelection(row: Int, col: Int, _ range: NSRange) {
-        guard var c = cell(row: row, col: col) else { return }
-        c.selectionRange = range
-        table.rows[row][col] = c
+        // The focused cell's mirror is cheap (unobserved) and stays fresh even
+        // when the stored range already matches.
         if focusedCell == GridCell(row: row, column: col) {
             selectionRange = range
         }
+        // Writing the cell mutates the observed table, which invalidates every
+        // view that reads it — so caret moves that don't change the stored
+        // range must not churn it.
+        guard var c = cell(row: row, col: col), c.selectionRange != range else { return }
+        c.selectionRange = range
+        table.rows[row][col] = c
     }
 
     private func clampSelection(inRow row: Int, col: Int) {
@@ -1302,15 +1307,28 @@ final class TableViewModel {
     @ObservationIgnored private var sidebarCoalesceTimer: Timer?
     private static let sidebarCoalesceDelay: CFAbsoluteTime = 0.02
 
-    /// The sidebar list's entry point: the selection loads on the next turn
-    /// after the last click of a burst, so a rapid sequence of clicks pays
-    /// a single document load instead of one per click.
+    /// The sidebar list's entry point. Leading-edge coalescing: with no
+    /// window open the burst's first request loads on the very next turn
+    /// (never this one — the List setter fires mid-update), so a single
+    /// click pays no delay; later requests within the 20 ms window collapse
+    /// into one trailing apply, so a rapid burst still pays one load per
+    /// burst instead of one per click.
     func requestSidebarSelection(_ new: Set<UUID>) {
+        let leading = sidebarCoalesceTimer == nil
         pendingSidebarSelection = new
+        if leading {
+            Task { @MainActor [weak self] in
+                guard let self, let selection = self.pendingSidebarSelection else { return }
+                self.pendingSidebarSelection = nil
+                self.applySidebarSelection(selection)
+            }
+        }
         sidebarCoalesceTimer?.invalidate()
         let timer = Timer(timeInterval: Self.sidebarCoalesceDelay, repeats: false) { [weak self] _ in
             Task { @MainActor [weak self] in
-                guard let self, let selection = self.pendingSidebarSelection else { return }
+                guard let self else { return }
+                self.sidebarCoalesceTimer = nil
+                guard let selection = self.pendingSidebarSelection else { return }
                 self.pendingSidebarSelection = nil
                 self.applySidebarSelection(selection)
             }
