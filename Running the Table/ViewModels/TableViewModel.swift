@@ -43,10 +43,6 @@ struct EditorSnapshot {
 // Deliberately flat: nested ObservableObjects crash observation tracking.
 @MainActor
 final class TableViewModel: ObservableObject {
-    /// Debug harness: the run-loop turn and mode at a contentRevision bump.
-    static func DBG_revision(_ rev: Int) {
-        NSLog("DBG contentRevision rev=\(rev) \(DBG_t()) \(DBG_turn())")
-    }
     @Published var documents: [TableDocument]
     @Published var selectedDocumentID: UUID?
     /// The sidebar's ⌘-click set; the editor follows its last-clicked table.
@@ -209,7 +205,6 @@ final class TableViewModel: ObservableObject {
         let before = currentSnapshot()
         mutate()
         contentRevision += 1
-        Self.DBG_revision(contentRevision)
         let after = currentSnapshot()
         registerSnapshotUndo(name: name, undoTo: before, redoTo: after)
     }
@@ -304,7 +299,6 @@ final class TableViewModel: ObservableObject {
         flushToDocument()
         regenerateHTML()
         contentRevision += 1
-        Self.DBG_revision(contentRevision)
     }
 
     // Later edits must never mutate state captured in a snapshot.
@@ -344,7 +338,6 @@ final class TableViewModel: ObservableObject {
         flushToDocument()
         regenerateHTML()
         contentRevision += 1
-        Self.DBG_revision(contentRevision)
         appendTypingChange(key: GridCell(row: row, column: col), name: "Edit Text", before: before)
     }
 
@@ -461,7 +454,6 @@ final class TableViewModel: ObservableObject {
         isUpdating = false
         keepFocusValid()
         contentRevision += 1
-        Self.DBG_revision(contentRevision)
         appendTypingChange(key: Self.htmlEditorKey, name: "Edit HTML", before: before)
     }
 
@@ -723,7 +715,6 @@ final class TableViewModel: ObservableObject {
         regenerateHTML()
         // Cells changed rows; text views must re-apply their content.
         contentRevision += 1
-        Self.DBG_revision(contentRevision)
         registerResizeUndo(name: "Move Row", before: before)
     }
 
@@ -785,7 +776,6 @@ final class TableViewModel: ObservableObject {
         regenerateHTML()
         // Cells changed columns; text views must re-apply their content.
         contentRevision += 1
-        Self.DBG_revision(contentRevision)
         registerResizeUndo(name: "Move Column", before: before)
     }
 
@@ -1019,7 +1009,6 @@ final class TableViewModel: ObservableObject {
         // The HTML pane refreshes on revision ticks; without one the
         // caption typing would land in the model but not on screen.
         contentRevision += 1
-        Self.DBG_revision(contentRevision)
         appendTypingChange(key: Self.captionKey, name: "Edit Caption", before: before)
     }
 
@@ -1309,7 +1298,6 @@ final class TableViewModel: ObservableObject {
     /// after the last click of a burst, so a rapid sequence of clicks pays
     /// a single document load instead of one per click.
     func requestSidebarSelection(_ new: Set<UUID>) {
-        DBG_switchClick()
         pendingSidebarSelection = new
         sidebarCoalesceTimer?.invalidate()
         let timer = Timer(timeInterval: Self.sidebarCoalesceDelay, repeats: false) { [weak self] _ in
@@ -1321,20 +1309,11 @@ final class TableViewModel: ObservableObject {
         }
         RunLoop.main.add(timer, forMode: .common)
         sidebarCoalesceTimer = timer
-        NSLog("DBG requestSidebarSelection new=\(new.count) pending=\(pendingSidebarSelection?.count ?? 0) timers=\(sidebarCoalesceTimer != nil ? 1 : 0)")
-    }
-
-    // TEMP DEBUG - remove after verification
-    func debugSidebarState() -> (pending: Int, timers: Int) {
-        return (pendingSidebarSelection?.count ?? 0, sidebarCoalesceTimer != nil ? 1 : 0)
     }
 
     /// The sidebar list's selection: plain click replaces, ⌘-click toggles.
     /// The editor follows the last-clicked table; clearing keeps the open one.
     func applySidebarSelection(_ new: Set<UUID>) {
-        let t0 = CFAbsoluteTimeGetCurrent()
-        DBG_switchApplyStart()
-        NSLog("DBG applySidebarSelection start \(DBG_t()) \(DBG_turn())")
         let old = sidebarSelection
         guard new != old else { return }
         sidebarSelection = new
@@ -1348,8 +1327,6 @@ final class TableViewModel: ObservableObject {
             primary = new.isEmpty ? nil : documents.first { new.contains($0.id) }?.id
         }
         if let primary, primary != selectedDocumentID { selectDocument(primary) }
-        DBG_switchApplyEnd()
-        NSLog("DBG applySidebarSelection took \(String(format: "%.2f", (CFAbsoluteTimeGetCurrent() - t0) * 1000)) ms")
     }
 
     /// Inline sidebar rename: keystrokes update the in-memory name only; the
@@ -1706,7 +1683,6 @@ final class TableViewModel: ObservableObject {
     private func loadDocument(_ document: TableDocument) {
         closeTypingGroup()
         selectedDocumentID = document.id
-        DBG_switchDoc("\(document.table.rows.count)x\(document.table.columnCount)\(document.rowHeights.isEmpty ? " first" : "")")
         table = document.table
         columnWidths = document.columnWidths
         rowHeights = document.rowHeights
@@ -1721,10 +1697,7 @@ final class TableViewModel: ObservableObject {
         // A file that loaded with markup complaints keeps showing them until
         // an edit normalizes it; regenerateHTML just cleared the live copy.
         markupDiagnostics = document.table.diagnostics
-        NSLog("DBG loadDocument before contentRevision=\(contentRevision)")
         contentRevision += 1
-        Self.DBG_revision(contentRevision)
-        NSLog("DBG loadDocument after contentRevision=\(contentRevision)")
         // Undo history is per table; the old stack would restore stale rows.
         // During an undo/redo of a delete, keep the stack intact.
         if !undoManager.isUndoing && !undoManager.isRedoing {
