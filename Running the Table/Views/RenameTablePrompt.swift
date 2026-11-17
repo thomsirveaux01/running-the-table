@@ -3,7 +3,7 @@ import SwiftUI
 /// Rename sheet: the title is the source of truth and the .html filename is
 /// derived from it, so the filename is shown (updating live) but not edited.
 struct RenameTablePrompt: View {
-    @ObservedObject var viewModel: TableViewModel
+    @Bindable var viewModel: TableViewModel
 
     private var trimmedTitle: String {
         viewModel.renameTitleText.trimmingCharacters(in: .whitespacesAndNewlines)

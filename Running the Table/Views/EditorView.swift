@@ -3,7 +3,7 @@ import SwiftUI
 // Groups must go through .toolbar (not a body HStack), each in a
 // ToolbarItemGroup, or placements clash.
 struct EditorView: View {
-    @ObservedObject var viewModel: TableViewModel
+    @Bindable var viewModel: TableViewModel
 
     // One font definition so every drawn toolbar label matches.
     private static let monoNSFont = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)

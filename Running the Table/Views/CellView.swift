@@ -1,7 +1,7 @@
 import SwiftUI
 
 struct CellView: View {
-    @ObservedObject var viewModel: TableViewModel
+    var viewModel: TableViewModel
     let row: Int
     let col: Int
     /// Visual column span of this slot, for drag selection with colspan.

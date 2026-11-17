@@ -5,7 +5,7 @@ import SwiftUI
 // NSTextView wrapper (not TextEditor) so this pane shares the cells' undo
 // stack instead of keeping a private one.
 struct HTMLView: View {
-    @ObservedObject var viewModel: TableViewModel
+    var viewModel: TableViewModel
 
     private static let editorFont = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
 
@@ -58,7 +58,7 @@ struct HTMLView: View {
             NSTextViewRepresentable(
                 content: htmlContent,
                 contentRevision: viewModel.contentRevision,
-                revision: viewModel.$contentRevision.eraseToAnyPublisher(),
+                revision: viewModel.contentRevisionPublisher,
                 contentProvider: { Self.liveContent(viewModel) },
                 isHeader: false,
                 scrolls: true,

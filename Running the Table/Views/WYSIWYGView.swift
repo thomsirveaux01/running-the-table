@@ -3,7 +3,7 @@ import Combine
 import SwiftUI
 
 struct WYSIWYGView: View {
-    @ObservedObject var viewModel: TableViewModel
+    var viewModel: TableViewModel
 
     static let divider: CGFloat = 1
     static let handleThickness: CGFloat = 6
@@ -402,7 +402,7 @@ struct WYSIWYGView: View {
 
 // One undo step per completed drag.
 struct ColumnResizeHandle: View {
-    @ObservedObject var viewModel: TableViewModel
+    var viewModel: TableViewModel
     let column: Int
     @State private var startWidth: CGFloat?
     @State private var beforeSnapshot: EditorSnapshot?
@@ -440,7 +440,7 @@ struct ColumnResizeHandle: View {
 }
 
 struct RowResizeHandle: View {
-    @ObservedObject var viewModel: TableViewModel
+    var viewModel: TableViewModel
     let row: Int
     @State private var startHeight: CGFloat?
     @State private var beforeSnapshot: EditorSnapshot?
@@ -497,7 +497,7 @@ final class RowDragState: ObservableObject {
 
 // Drag the strip to move its row; the drop commits as one undo step.
 struct RowMoveHandle: View {
-    @ObservedObject var viewModel: TableViewModel
+    var viewModel: TableViewModel
     @ObservedObject var dragState: RowDragState
     let row: Int
     @State private var beforeSnapshot: EditorSnapshot?
@@ -627,7 +627,7 @@ final class ColumnDragState: ObservableObject {
 // Drag the strip to move its column. Colspan-covered columns show a blank
 // strip: they can't move cleanly, so they stay un-grabbable.
 struct ColumnMoveHandle: View {
-    @ObservedObject var viewModel: TableViewModel
+    var viewModel: TableViewModel
     @ObservedObject var dragState: ColumnDragState
     let col: Int
     @State private var beforeSnapshot: EditorSnapshot?

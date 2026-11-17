@@ -2,7 +2,7 @@ import SwiftUI
 
 /// Name prompt for "Save as Template…", mirroring the link sheet's shape.
 struct TemplateNamePrompt: View {
-    @ObservedObject var viewModel: TableViewModel
+    @Bindable var viewModel: TableViewModel
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -28,7 +28,7 @@ struct TemplateNamePrompt: View {
 
 /// Edit ▸ Manage Templates…: rename in place, delete with the trash button.
 struct TemplateManagerView: View {
-    @ObservedObject var viewModel: TableViewModel
+    var viewModel: TableViewModel
     // Edits stage here and commit on submit, so a half-typed name never
     // touches the template files.
     @State private var drafts: [UUID: String] = [:]

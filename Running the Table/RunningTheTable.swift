@@ -1,7 +1,9 @@
 import SwiftUI
 
 @main struct RunningTheTable: App {
-    @StateObject private var viewModel = TableViewModel()
+    // @State holds the @Observable model (the Observation-era replacement
+    // for @StateObject; @Observable does not conform to ObservableObject).
+    @State private var viewModel = TableViewModel()
     @StateObject private var updater = UpdateChecker()
     @StateObject private var library = LibraryCoordinator()
 

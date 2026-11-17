@@ -4,7 +4,7 @@ import SwiftUI
 /// anything the author cares to write. Rows edit name/value pairs; the grid
 /// never touches these, it only keeps them.
 struct TableAttributesSheet: View {
-    @ObservedObject var viewModel: TableViewModel
+    @Bindable var viewModel: TableViewModel
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {

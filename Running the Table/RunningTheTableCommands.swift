@@ -4,7 +4,10 @@ import SwiftUI
 /// The app's whole menu-bar additions, in one Commands value so the
 /// menu-reading probes can compile the identical commands into a test app.
 struct RunningTheTableCommands: Commands {
-    @ObservedObject var viewModel: TableViewModel
+    // Plain: TableViewModel is @Observable, and Commands cannot wrap one in
+    // @ObservedObject. Menu enablement re-validates when the items' views'
+    // observed reads change (verified via toolbarprobe + menudump).
+    var viewModel: TableViewModel
     // Defaulted so menu probes compile the identical commands unchanged.
     @ObservedObject var updater: UpdateChecker = UpdateChecker()
     @ObservedObject var library: LibraryCoordinator = LibraryCoordinator()

@@ -4,7 +4,7 @@ import SwiftUI
 /// refuses outright when the table has no header row (a single sheet so a
 /// long loss list can scroll, which alerts cannot).
 struct MarkdownExportPrompt: View {
-    @ObservedObject var viewModel: TableViewModel
+    var viewModel: TableViewModel
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {

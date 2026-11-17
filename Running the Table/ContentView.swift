@@ -2,7 +2,7 @@ import AppKit
 import SwiftUI
 
 struct ContentView: View {
-    @ObservedObject var viewModel: TableViewModel
+    @Bindable var viewModel: TableViewModel
     // Defaulted so the offscreen probes keep compiling without owning one.
     @ObservedObject var updater: UpdateChecker = UpdateChecker()
     @ObservedObject var library: LibraryCoordinator = LibraryCoordinator()
@@ -214,7 +214,7 @@ struct ContentView: View {
 // Rows stay plain text until renamed so the list — not a text field — holds
 // focus, which is what makes the Delete key work.
 struct SidebarView: View {
-    @ObservedObject var viewModel: TableViewModel
+    var viewModel: TableViewModel
     @State private var editingID: UUID?
     @State private var swipedID: UUID?
 
@@ -341,7 +341,7 @@ private struct SwipeToDelete: ViewModifier {
 }
 
 struct SidebarRow: View {
-    @ObservedObject var viewModel: TableViewModel
+    var viewModel: TableViewModel
     let documentID: UUID
     let isEditing: Bool
     let beginEdit: () -> Void

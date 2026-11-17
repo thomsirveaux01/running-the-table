@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import Observation
 import SwiftUI
 
 struct GridCell: Hashable {
@@ -40,20 +41,26 @@ struct EditorSnapshot {
     let focusedCell: GridCell?
 }
 
-// Deliberately flat: nested ObservableObjects crash observation tracking.
 @MainActor
-final class TableViewModel: ObservableObject {
-    @Published var documents: [TableDocument]
-    @Published var selectedDocumentID: UUID?
+@Observable
+final class TableViewModel {
+    var documents: [TableDocument]
+    var selectedDocumentID: UUID?
     /// The sidebar's ⌘-click set; the editor follows its last-clicked table.
-    @Published var sidebarSelection: Set<UUID> = []
-    @Published var table: Table
+    var sidebarSelection: Set<UUID> = []
+    var table: Table
     // Text views re-apply content only on revision bumps, so a stale render
-    // can't revert text the user just typed.
-    @Published private(set) var contentRevision = 0
+    // can't revert text the user just typed. The didSet drives the HTML
+    // pane's subscription (grid cells apply via their own refresh path).
+    private(set) var contentRevision = 0 {
+        didSet { revisionSubject.send(contentRevision) }
+    }
+    @ObservationIgnored
+    private let revisionSubject = PassthroughSubject<Int, Never>()
+    var contentRevisionPublisher: AnyPublisher<Int, Never> { revisionSubject.eraseToAnyPublisher() }
 
-    @Published var htmlText: String = ""
-    @Published var focusedCell: GridCell? {
+    var htmlText: String = ""
+    var focusedCell: GridCell? {
         didSet {
             guard focusedCell != oldValue else { return }
             // Typing runs end when focus moves to another cell.
@@ -65,45 +72,46 @@ final class TableViewModel: ObservableObject {
             }
         }
     }
-    // Plain var, not @Published: nothing observes it, and publishing it from
+    // Plain var, not observed: nothing renders it, and mutating it from
     // focusedCell's didSet during a view update trips SwiftUI's "publishing
     // from within view updates" fault.
+    @ObservationIgnored
     var selectionRange = NSRange(location: 0, length: 0)
     /// Rectangular drag selection in visual coordinates; nil when none.
-    @Published var cellSelection: VisualCellRange?
-    @Published var columnWidths: [CGFloat] = []
-    @Published var rowHeights: [CGFloat] = []
-    @Published var showLinkPrompt = false
-    @Published var linkURLText = ""
+    var cellSelection: VisualCellRange?
+    var columnWidths: [CGFloat] = []
+    var rowHeights: [CGFloat] = []
+    var showLinkPrompt = false
+    var linkURLText = ""
     /// True while a text view owns the caret; the ⌘⌫ delete-table chord disables
     /// itself so the keystroke stays a text-editing command.
-    @Published private(set) var isEditingText = false
+    private(set) var isEditingText = false
 
     /// Table snapshots offered by New from Template. They live in a subfolder,
     /// so loadStoredDocuments never lists them as tables.
-    @Published private(set) var templates: [TableDocument] = []
-    @Published var showTemplatePrompt = false
-    @Published var templateNameText = ""
-    @Published var showTemplateManager = false
-    @Published var showRenamePrompt = false
-    @Published var renameTitleText = ""
+    private(set) var templates: [TableDocument] = []
+    var showTemplatePrompt = false
+    var templateNameText = ""
+    var showTemplateManager = false
+    var showRenamePrompt = false
+    var renameTitleText = ""
     /// Markdown export prompt: the loss list, or a refusal when the table has
     /// no header row (Markdown requires one).
-    @Published var showMarkdownExportPrompt = false
-    @Published var markdownExportLosses: [String] = []
-    @Published var markdownExportBlocked = false
+    var showMarkdownExportPrompt = false
+    var markdownExportLosses: [String] = []
+    var markdownExportBlocked = false
     /// The filename the rename sheet displays, derived live from the title.
     var renameFileNameDisplay: String {
         Self.sanitizedFileName(renameTitleText.trimmingCharacters(in: .whitespacesAndNewlines))
     }
     /// Notes on dropped or unclosed markup in the latest source-pane parse;
     /// empty whenever the grid generated the HTML.
-    @Published private(set) var markupDiagnostics: [String] = []
-    private var renamingID: UUID?
-    private var templateDraftTable: Table?
+    private(set) var markupDiagnostics: [String] = []
+    @ObservationIgnored private var renamingID: UUID?
+    @ObservationIgnored private var templateDraftTable: Table?
 
     // Prevents recursive WYSIWYG/HTML pane updates during sync.
-    var isUpdating = false
+    @ObservationIgnored var isUpdating = false
 
     static let defaultColumnWidth: CGFloat = 140
     static let defaultRowHeight: CGFloat = 32
@@ -132,10 +140,6 @@ final class TableViewModel: ObservableObject {
         // Manual grouping: one undo reverts one logical change regardless of
         // how many registrations happen in a single run-loop pass.
         undoManager.groupsByEvent = false
-        // The Task hop runs the sink after the mutation has settled.
-        autosaveObserver = objectWillChange.sink { [weak self] _ in
-            Task { @MainActor in self?.scheduleAutosave() }
-        }
         // Quitting mid-debounce must not lose the last edits.
         NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification,
                                              object: nil, queue: .main) { [weak self] _ in
@@ -178,6 +182,7 @@ final class TableViewModel: ObservableObject {
                 savedHTML[doc.id] = html
             }
         }
+        scheduleAutosave()
     }
 
     // Shared stack: cells and the HTML pane return this from their
@@ -192,8 +197,8 @@ final class TableViewModel: ObservableObject {
         let before: EditorSnapshot
     }
 
-    private var pendingTyping: PendingTyping?
-    private var typingTimer: Timer?
+    @ObservationIgnored private var pendingTyping: PendingTyping?
+    @ObservationIgnored private var typingTimer: Timer?
 
     // Sentinel key for the HTML source pane's typing run.
     static let htmlEditorKey = GridCell(row: -1, column: -1)
@@ -458,6 +463,9 @@ final class TableViewModel: ObservableObject {
     }
 
     private func flushToDocument() {
+        // The @Published sink this replaces fired on every data mutation;
+        // flushToDocument is where every data-changing path passes through.
+        scheduleAutosave()
         guard let idx = currentDocumentIndex else { return }
         documents[idx].table = table
         documents[idx].columnWidths = columnWidths
@@ -1049,12 +1057,12 @@ final class TableViewModel: ObservableObject {
 
     // MARK: - Table attributes
 
-    @Published var showTableAttributes = false
-    @Published var attributesDraft: [HTMLAttribute] = []
+    var showTableAttributes = false
+    var attributesDraft: [HTMLAttribute] = []
     /// Accessibility emission toggles, mirrored from the table when the
     /// sheet opens and written back on commit (an undoable attribute edit).
-    @Published var accessibilityScope: Bool = false
-    @Published var accessibilitySRText: Bool = false
+    var accessibilityScope: Bool = false
+    var accessibilitySRText: Bool = false
 
     func beginTableAttributes() {
         flushToDocument()
@@ -1290,8 +1298,8 @@ final class TableViewModel: ObservableObject {
     // restarts the timer and only the last request of a burst loads, 20 ms
     // after the burst ends. 20 ms still defers to the next turn (the List
     // setter fires mid-update) while keeping single clicks feeling instant.
-    private var pendingSidebarSelection: Set<UUID>?
-    private var sidebarCoalesceTimer: Timer?
+    @ObservationIgnored private var pendingSidebarSelection: Set<UUID>?
+    @ObservationIgnored private var sidebarCoalesceTimer: Timer?
     private static let sidebarCoalesceDelay: CFAbsoluteTime = 0.02
 
     /// The sidebar list's entry point: the selection loads on the next turn
@@ -1338,6 +1346,7 @@ final class TableViewModel: ObservableObject {
         if id == selectedDocumentID {
             table.name = documents[idx].name
         }
+        scheduleAutosave()
     }
 
     /// Commits an inline sidebar rename: the file is moved to the new name.
@@ -1403,6 +1412,8 @@ final class TableViewModel: ObservableObject {
             table.name = title
         }
         renameFileToMatchName(id)
+        // An unsaved table has no file to move; the autosave derives it.
+        scheduleAutosave()
 
         let afterDocuments = deepCopied(documents)
         let afterSelection = selectedDocumentID
@@ -1500,6 +1511,7 @@ final class TableViewModel: ObservableObject {
         savedHTML.removeValue(forKey: id)
         modifiedDates.removeValue(forKey: id)
         sidebarSelection.remove(id)
+        scheduleAutosave()
         // The file goes with it; an undo restores the table and the next
         // autosave pass writes the file back.
         if let removedFileURL {
@@ -1563,6 +1575,7 @@ final class TableViewModel: ObservableObject {
             focusedCell = nil
             sidebarSelection = []
         }
+        scheduleAutosave()
     }
 
     func duplicateSelectedDocument() {
@@ -1703,6 +1716,9 @@ final class TableViewModel: ObservableObject {
         if !undoManager.isUndoing && !undoManager.isRedoing {
             undoManager.removeAllActions()
         }
+        // A first visit grows row heights (unflushed until the next edit); the
+        // old @Published sink saved after every load, so keep that parity.
+        scheduleAutosave()
     }
 
     func ensureSizing() {
@@ -1793,14 +1809,13 @@ final class TableViewModel: ObservableObject {
 
     // Typing coalesces into one write per pause.
     private static let autosaveDelay: TimeInterval = 0.8
-    private var autosaveTimer: Timer?
-    private var autosaveObserver: AnyCancellable?
+    @ObservationIgnored private var autosaveTimer: Timer?
     // Unchanged HTML is never rewritten, so the debounce pass costs no disk churn.
-    private var savedHTML: [UUID: String] = [:]
+    @ObservationIgnored private var savedHTML: [UUID: String] = [:]
     // The file's mtime stands in for "last edited"; cached so a sidebar row
     // never does a synchronous file stat per render (a synced library folder
     // makes that a network round trip per row).
-    private var modifiedDates: [UUID: Date] = [:]
+    @ObservationIgnored private var modifiedDates: [UUID: Date] = [:]
 
     /// The file's mtime, cached after the first read. Nil when unsaved.
     func modifiedDate(for id: UUID) -> Date? {
