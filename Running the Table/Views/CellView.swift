@@ -1,4 +1,3 @@
-import Combine
 import SwiftUI
 
 struct CellView: View {
@@ -25,7 +24,7 @@ struct CellView: View {
             NSTextViewRepresentable(
                 content: cell.content,
                 contentRevision: viewModel.contentRevision,
-                revision: viewModel.$contentRevision.eraseToAnyPublisher(),
+                revision: nil,
                 contentProvider: { viewModel.cell(row: row, col: col)?.content ?? NSAttributedString() },
                 isHeader: cell.isHeader,
                 textAlignment: cell.alignment,

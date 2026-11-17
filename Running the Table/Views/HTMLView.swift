@@ -73,7 +73,8 @@ struct HTMLView: View {
                 },
                 highlightsSyntax: true,
                 showsLineNumbers: true,
-                highlightsCurrentLine: true
+                highlightsCurrentLine: true,
+                defersContent: true
             )
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }

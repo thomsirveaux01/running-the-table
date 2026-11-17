@@ -54,6 +54,9 @@ struct ContentView: View {
         .sheet(isPresented: $viewModel.showRenamePrompt) {
             RenameTablePrompt(viewModel: viewModel)
         }
+        .sheet(isPresented: $viewModel.showMarkdownExportPrompt) {
+            MarkdownExportPrompt(viewModel: viewModel)
+        }
         .sheet(isPresented: $viewModel.showTableAttributes) {
             TableAttributesSheet(viewModel: viewModel)
         }
@@ -246,8 +249,9 @@ struct SidebarView: View {
             set: { newValue in
                 // SwiftUI hands the List's selection change to this setter during
                 // its own view-update pass; applySidebarSelection loads a document,
-                // which would publish mid-update. Defer to the next main-actor turn.
-                Task { @MainActor in viewModel.applySidebarSelection(newValue) }
+                // which would publish mid-update. Defer via the request so a lone
+                // click loads on the next turn and a burst coalesces into one.
+                viewModel.requestSidebarSelection(newValue)
             }
         )) {
             ForEach(viewModel.documents) { document in
@@ -352,8 +356,6 @@ struct SidebarRow: View {
         )
     }
 
-    // The file's mtime stands in for "last edited": autosave rewrites it on
-    // every change and steady-state launches never rewrite unchanged files.
     // Fixed formatter: FormatStyle can't easily produce "MM/dd/yy, hh:mm a".
     private static let modifiedFormatter: DateFormatter = {
         let formatter = DateFormatter()
@@ -362,9 +364,7 @@ struct SidebarRow: View {
     }()
 
     private var modifiedCaption: String {
-        guard let url = viewModel.document(id: documentID)?.fileURL,
-              let mtime = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
-        else { return "Not saved yet" }
+        guard let mtime = viewModel.modifiedDate(for: documentID) else { return "Not saved yet" }
         return Self.modifiedFormatter.string(from: mtime)
     }
 

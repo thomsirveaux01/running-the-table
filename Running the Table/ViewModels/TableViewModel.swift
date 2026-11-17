@@ -43,6 +43,10 @@ struct EditorSnapshot {
 // Deliberately flat: nested ObservableObjects crash observation tracking.
 @MainActor
 final class TableViewModel: ObservableObject {
+    /// Debug harness: the run-loop turn and mode at a contentRevision bump.
+    static func DBG_revision(_ rev: Int) {
+        NSLog("DBG contentRevision rev=\(rev) \(DBG_t()) \(DBG_turn())")
+    }
     @Published var documents: [TableDocument]
     @Published var selectedDocumentID: UUID?
     /// The sidebar's ⌘-click set; the editor follows its last-clicked table.
@@ -87,6 +91,11 @@ final class TableViewModel: ObservableObject {
     @Published var showTemplateManager = false
     @Published var showRenamePrompt = false
     @Published var renameTitleText = ""
+    /// Markdown export prompt: the loss list, or a refusal when the table has
+    /// no header row (Markdown requires one).
+    @Published var showMarkdownExportPrompt = false
+    @Published var markdownExportLosses: [String] = []
+    @Published var markdownExportBlocked = false
     /// The filename the rename sheet displays, derived live from the title.
     var renameFileNameDisplay: String {
         Self.sanitizedFileName(renameTitleText.trimmingCharacters(in: .whitespacesAndNewlines))
@@ -167,6 +176,7 @@ final class TableViewModel: ObservableObject {
         ensureSizing()
         regenerateHTML()
         savedHTML.removeAll()
+        modifiedDates.removeAll()
         for doc in documents {
             if let url = doc.fileURL, let html = try? String(contentsOf: url, encoding: .utf8) {
                 savedHTML[doc.id] = html
@@ -199,6 +209,7 @@ final class TableViewModel: ObservableObject {
         let before = currentSnapshot()
         mutate()
         contentRevision += 1
+        Self.DBG_revision(contentRevision)
         let after = currentSnapshot()
         registerSnapshotUndo(name: name, undoTo: before, redoTo: after)
     }
@@ -293,6 +304,7 @@ final class TableViewModel: ObservableObject {
         flushToDocument()
         regenerateHTML()
         contentRevision += 1
+        Self.DBG_revision(contentRevision)
     }
 
     // Later edits must never mutate state captured in a snapshot.
@@ -332,6 +344,7 @@ final class TableViewModel: ObservableObject {
         flushToDocument()
         regenerateHTML()
         contentRevision += 1
+        Self.DBG_revision(contentRevision)
         appendTypingChange(key: GridCell(row: row, column: col), name: "Edit Text", before: before)
     }
 
@@ -448,6 +461,7 @@ final class TableViewModel: ObservableObject {
         isUpdating = false
         keepFocusValid()
         contentRevision += 1
+        Self.DBG_revision(contentRevision)
         appendTypingChange(key: Self.htmlEditorKey, name: "Edit HTML", before: before)
     }
 
@@ -709,6 +723,7 @@ final class TableViewModel: ObservableObject {
         regenerateHTML()
         // Cells changed rows; text views must re-apply their content.
         contentRevision += 1
+        Self.DBG_revision(contentRevision)
         registerResizeUndo(name: "Move Row", before: before)
     }
 
@@ -770,6 +785,7 @@ final class TableViewModel: ObservableObject {
         regenerateHTML()
         // Cells changed columns; text views must re-apply their content.
         contentRevision += 1
+        Self.DBG_revision(contentRevision)
         registerResizeUndo(name: "Move Column", before: before)
     }
 
@@ -1003,6 +1019,7 @@ final class TableViewModel: ObservableObject {
         // The HTML pane refreshes on revision ticks; without one the
         // caption typing would land in the model but not on screen.
         contentRevision += 1
+        Self.DBG_revision(contentRevision)
         appendTypingChange(key: Self.captionKey, name: "Edit Caption", before: before)
     }
 
@@ -1280,9 +1297,44 @@ final class TableViewModel: ObservableObject {
         sidebarSelection.isEmpty ? Set(selectedDocumentID.map { [$0] } ?? []) : sidebarSelection
     }
 
+    // Rapid clicks would each pay a full document load, so every request
+    // restarts the timer and only the last request of a burst loads, 20 ms
+    // after the burst ends. 20 ms still defers to the next turn (the List
+    // setter fires mid-update) while keeping single clicks feeling instant.
+    private var pendingSidebarSelection: Set<UUID>?
+    private var sidebarCoalesceTimer: Timer?
+    private static let sidebarCoalesceDelay: CFAbsoluteTime = 0.02
+
+    /// The sidebar list's entry point: the selection loads on the next turn
+    /// after the last click of a burst, so a rapid sequence of clicks pays
+    /// a single document load instead of one per click.
+    func requestSidebarSelection(_ new: Set<UUID>) {
+        DBG_switchClick()
+        pendingSidebarSelection = new
+        sidebarCoalesceTimer?.invalidate()
+        let timer = Timer(timeInterval: Self.sidebarCoalesceDelay, repeats: false) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self, let selection = self.pendingSidebarSelection else { return }
+                self.pendingSidebarSelection = nil
+                self.applySidebarSelection(selection)
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        sidebarCoalesceTimer = timer
+        NSLog("DBG requestSidebarSelection new=\(new.count) pending=\(pendingSidebarSelection?.count ?? 0) timers=\(sidebarCoalesceTimer != nil ? 1 : 0)")
+    }
+
+    // TEMP DEBUG - remove after verification
+    func debugSidebarState() -> (pending: Int, timers: Int) {
+        return (pendingSidebarSelection?.count ?? 0, sidebarCoalesceTimer != nil ? 1 : 0)
+    }
+
     /// The sidebar list's selection: plain click replaces, ⌘-click toggles.
     /// The editor follows the last-clicked table; clearing keeps the open one.
     func applySidebarSelection(_ new: Set<UUID>) {
+        let t0 = CFAbsoluteTimeGetCurrent()
+        DBG_switchApplyStart()
+        NSLog("DBG applySidebarSelection start \(DBG_t()) \(DBG_turn())")
         let old = sidebarSelection
         guard new != old else { return }
         sidebarSelection = new
@@ -1296,6 +1348,8 @@ final class TableViewModel: ObservableObject {
             primary = new.isEmpty ? nil : documents.first { new.contains($0.id) }?.id
         }
         if let primary, primary != selectedDocumentID { selectDocument(primary) }
+        DBG_switchApplyEnd()
+        NSLog("DBG applySidebarSelection took \(String(format: "%.2f", (CFAbsoluteTimeGetCurrent() - t0) * 1000)) ms")
     }
 
     /// Inline sidebar rename: keystrokes update the in-memory name only; the
@@ -1467,6 +1521,7 @@ final class TableViewModel: ObservableObject {
 
         documents.remove(at: idx)
         savedHTML.removeValue(forKey: id)
+        modifiedDates.removeValue(forKey: id)
         sidebarSelection.remove(id)
         // The file goes with it; an undo restores the table and the next
         // autosave pass writes the file back.
@@ -1515,6 +1570,10 @@ final class TableViewModel: ObservableObject {
 
     private func restoreDocuments(_ docs: [TableDocument], selection: UUID?) {
         documents = deepCopied(docs)
+        // The restored tables' files may not exist on disk (an undo of a
+        // delete re-creates the tables, not the files), so the cached mtimes
+        // are stale until the next autosave pass.
+        modifiedDates.removeAll()
         if let sel = selection, let doc = documents.first(where: { $0.id == sel }) {
             loadDocument(doc)
             sidebarSelection = [sel]
@@ -1647,6 +1706,7 @@ final class TableViewModel: ObservableObject {
     private func loadDocument(_ document: TableDocument) {
         closeTypingGroup()
         selectedDocumentID = document.id
+        DBG_switchDoc("\(document.table.rows.count)x\(document.table.columnCount)\(document.rowHeights.isEmpty ? " first" : "")")
         table = document.table
         columnWidths = document.columnWidths
         rowHeights = document.rowHeights
@@ -1661,7 +1721,10 @@ final class TableViewModel: ObservableObject {
         // A file that loaded with markup complaints keeps showing them until
         // an edit normalizes it; regenerateHTML just cleared the live copy.
         markupDiagnostics = document.table.diagnostics
+        NSLog("DBG loadDocument before contentRevision=\(contentRevision)")
         contentRevision += 1
+        Self.DBG_revision(contentRevision)
+        NSLog("DBG loadDocument after contentRevision=\(contentRevision)")
         // Undo history is per table; the old stack would restore stale rows.
         // During an undo/redo of a delete, keep the stack intact.
         if !undoManager.isUndoing && !undoManager.isRedoing {
@@ -1761,6 +1824,20 @@ final class TableViewModel: ObservableObject {
     private var autosaveObserver: AnyCancellable?
     // Unchanged HTML is never rewritten, so the debounce pass costs no disk churn.
     private var savedHTML: [UUID: String] = [:]
+    // The file's mtime stands in for "last edited"; cached so a sidebar row
+    // never does a synchronous file stat per render (a synced library folder
+    // makes that a network round trip per row).
+    private var modifiedDates: [UUID: Date] = [:]
+
+    /// The file's mtime, cached after the first read. Nil when unsaved.
+    func modifiedDate(for id: UUID) -> Date? {
+        if let cached = modifiedDates[id] { return cached }
+        guard let url = document(id: id)?.fileURL,
+              let mtime = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+        else { return nil }
+        modifiedDates[id] = mtime
+        return mtime
+    }
 
     private func scheduleAutosave() {
         autosaveTimer?.invalidate()
@@ -1798,6 +1875,9 @@ final class TableViewModel: ObservableObject {
             }
             savedHTML[documents[idx].id] = html
             documents[idx].fileURL = url
+            if let mtime = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate {
+                modifiedDates[documents[idx].id] = mtime
+            }
         }
     }
 
@@ -2084,6 +2164,107 @@ final class TableViewModel: ObservableObject {
         return grid
     }
 
+    // MARK: - Markdown import/export
+
+    /// File ▸ Import ▸ Markdown…: pick a file and load each pipe table in it
+    /// as its own document in one undo step.
+    func importMarkdown() {
+        Self.mdImporter.chooseMarkdownFile(prompt: "Import", into: nil) { [weak self] url in
+            guard let self, let url else { return }
+            self.importMarkdownFile(at: url)
+        }
+    }
+
+    func importMarkdownFile(at url: URL) {
+        let accessed = Self.csvBeginAccess(url)
+        defer { if accessed { Self.csvEndAccess(url) } }
+        guard let text = try? String(contentsOf: url, encoding: .utf8) else { return }
+        let found = MarkdownTable.tables(in: text)
+        guard !found.isEmpty else { return }
+        newTables(fromMarkdown: found, nameFallback: url.deletingPathExtension().lastPathComponent)
+    }
+
+    /// One document per pipe table, titled by the nearest preceding heading
+    /// (file stem when none); the first is loaded and the whole file is one
+    /// undo step.
+    func newTables(fromMarkdown found: [MarkdownTable.Found], nameFallback: String) {
+        closeTypingGroup()
+        flushToDocument()
+        let beforeDocuments = deepCopied(documents)
+        let beforeSelection = selectedDocumentID
+
+        var taken = Set(documents.map(\.name))
+        var firstID: UUID?
+        var firstDisplayName = ""
+        for f in found {
+            let base = (f.title?.isEmpty == false) ? f.title! : nameFallback
+            let displayName = uniqueName(base, avoiding: taken)
+            taken.insert(displayName)
+            if firstID == nil { firstDisplayName = displayName }
+            let table = Table.loaded(from: HTMLParser.parseTable(f.html), name: displayName)
+            let doc = TableDocument(table: table, fileURL: nil)
+            documents.append(doc)
+            if firstID == nil { firstID = doc.id }
+        }
+        if let firstID, let doc = documents.first(where: { $0.id == firstID }) {
+            loadDocument(doc)
+            sidebarSelection = [firstID]
+        }
+
+        let undoName = found.count == 1
+            ? "Import \(firstDisplayName)"
+            : "Import \(found.count) Tables"
+        registerDocumentUndo(name: undoName,
+                             undoTo: beforeDocuments, undoSelection: beforeSelection,
+                             redoTo: deepCopied(documents), redoSelection: selectedDocumentID)
+    }
+
+    /// File ▸ Export ▸ Markdown…: a headless table is refused in the prompt
+    /// sheet, losses are disclosed there, and a clean table goes straight to
+    /// the save panel.
+    func exportMarkdown() {
+        guard selectedDocumentID != nil else { return }
+        guard table.rows.contains(where: { $0.section == .head }) else {
+            markdownExportBlocked = true
+            markdownExportLosses = []
+            showMarkdownExportPrompt = true
+            return
+        }
+        let losses = MarkdownTable.losses(for: table)
+        guard !losses.isEmpty else {
+            presentMarkdownSavePanel()
+            return
+        }
+        markdownExportBlocked = false
+        markdownExportLosses = losses
+        showMarkdownExportPrompt = true
+    }
+
+    func confirmMarkdownExport() {
+        showMarkdownExportPrompt = false
+        presentMarkdownSavePanel()
+    }
+
+    func cancelMarkdownExport() {
+        showMarkdownExportPrompt = false
+    }
+
+    private func presentMarkdownSavePanel() {
+        let suggested = TableViewModel.sanitizedFileName(table.name) + ".md"
+        Self.mdExporter.chooseMarkdownFile(prompt: "Export", suggestedName: suggested,
+                                           defaultURL: Self.saveDirectory, into: nil) { [weak self] url in
+            guard let self, let url else { return }
+            self.exportMarkdownFile(to: url)
+        }
+    }
+
+    func exportMarkdownFile(to url: URL) {
+        let accessed = Self.csvBeginAccess(url)
+        defer { if accessed { Self.csvEndAccess(url) } }
+        guard let markdown = MarkdownTable.markdown(for: table) else { return }
+        try? markdown.write(to: url, atomically: true, encoding: .utf8)
+    }
+
     /// True when a text view owns the caret. Field editors are NSTextViews, so
     /// cells, the source pane, renames and the link sheet are one check.
     static func caretInTextView(_ window: NSWindow?) -> Bool {
@@ -2167,4 +2348,9 @@ final class TableViewModel: ObservableObject {
     static var csvExporter: CSVFileExporting = SystemCSVExporter()
     static var csvBeginAccess: (URL) -> Bool = { $0.startAccessingSecurityScopedResource() }
     static var csvEndAccess: (URL) -> Void = { $0.stopAccessingSecurityScopedResource() }
+
+    // Markdown file picking behind the same injectable seams as CSV; the
+    // access pair is shared since it is generic security-scoped access.
+    static var mdImporter: MarkdownFileImporting = SystemMarkdownImporter()
+    static var mdExporter: MarkdownFileExporting = SystemMarkdownExporter()
 }

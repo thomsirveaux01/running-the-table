@@ -1,6 +1,7 @@
 import AppKit
 import Combine
 import SwiftUI
+import CoreFoundation
 
 /// Row/column edits a cell's context menu offers; the raw value rides along as
 /// the menu item's tag so one action method dispatches them all.
@@ -55,6 +56,105 @@ func pruneSystemItems(from menu: NSMenu) {
     drop.forEach { menu.removeItem($0) }
     while menu.items.last?.isSeparatorItem == true { menu.removeItem(at: menu.items.count - 1) }
 }
+
+// Run-loop turn counter: every entry into the main run loop increments it, so
+// the logs can count turns between the publish and the apply.
+var runLoopTurns: Int = 0
+private var runLoopObserverRegistered = false
+
+private func registerRunLoopObserver() {
+    guard !runLoopObserverRegistered else { return }
+    runLoopObserverRegistered = true
+    var context = CFRunLoopObserverContext(
+        version: 0, info: nil, retain: nil, release: nil, copyDescription: nil)
+    let observer = CFRunLoopObserverCreate(
+        nil,
+        CFOptionFlags(1),
+        true,
+        0,
+        { _, _, _ in runLoopTurns += 1 },
+        &context
+    )
+    CFRunLoopAddObserver(CFRunLoopGetMain()!, observer!, CFRunLoopMode.commonModes)
+}
+
+func DBG_turn() -> String {
+    registerRunLoopObserver()
+    return "turn=\(runLoopTurns) mode=\(RunLoop.main.currentMode?.rawValue ?? "none")"
+}
+
+func DBG_t() -> String {
+    "t=\(String(format: "%.3f", (CFAbsoluteTimeGetCurrent() - mainT0) * 1000))"
+}
+
+// Probe-side pass accounting: updateNSView calls per switch (500 = one pass
+// over a 50x10 grid, 1000 = two) and full text writes (vs equality-skips).
+var DBG_updateNSViewTotal = 0
+var DBG_applyWrites = 0
+// One call stack per revision per wave, to see who drives each updateNSView pass.
+var DBG_stackP1Rev = -1
+var DBG_stackP2Rev = -1
+// One detailed dump of the first failed equality-skip.
+var DBG_eqFailLogged = false
+
+// Per-switch tracer: one "DBG SWITCH" line per sidebar click so the real
+// app's click→render cost is readable without the per-cell noise. The summary
+// fires 500 ms after the last click — long enough for even a slow render wave
+// (two body-eval passes) to have settled. Grep "DBG SWITCH" in the console.
+var DBG_swClick: CFAbsoluteTime = 0
+var DBG_swApplyStart: CFAbsoluteTime = 0
+var DBG_swApplyEnd: CFAbsoluteTime = 0
+var DBG_swLastUpdate: CFAbsoluteTime = 0
+var DBG_swUpdates = 0
+var DBG_swWrites = 0
+var DBG_swDoc = ""
+var DBG_swPending = false
+var DBG_swTimer: Timer?
+
+/// Emit the pending switch's summary. Each switch is summarized exactly once:
+/// at the next click (its render is settled by then) or at the 500 ms fallback
+/// timer for the final click — robust to however fast the clicks come.
+func DBG_switchEmit() {
+    guard DBG_swPending, DBG_swClick > 0 else { return }
+    DBG_swPending = false
+    func off(_ t: CFAbsoluteTime) -> String {
+        t > 0 ? String(format: "%.0f", (t - DBG_swClick) * 1000) : "-"
+    }
+    let load = (DBG_swApplyStart > 0 && DBG_swApplyEnd > 0)
+        ? String(format: "%.1f", (DBG_swApplyEnd - DBG_swApplyStart) * 1000) : "-"
+    NSLog("DBG SWITCH doc=%@ apply@%@ms load=%@ms render@%@ms updates=%d writes=%d",
+          DBG_swDoc.isEmpty ? "?" : DBG_swDoc,
+          off(DBG_swApplyStart), load, off(DBG_swLastUpdate),
+          DBG_swUpdates, DBG_swWrites)
+}
+
+func DBG_switchClick() {
+    // A new click means the previous switch's render is done — summarize it.
+    DBG_switchEmit()
+    DBG_swClick = CFAbsoluteTimeGetCurrent()
+    DBG_swApplyStart = 0
+    DBG_swApplyEnd = 0
+    DBG_swLastUpdate = 0
+    DBG_swUpdates = 0
+    DBG_swWrites = 0
+    DBG_swDoc = ""
+    DBG_swPending = true
+    DBG_swTimer?.invalidate()
+    let timer = Timer(timeInterval: 0.5, repeats: false) { _ in DBG_switchEmit() }
+    RunLoop.main.add(timer, forMode: .common)
+    DBG_swTimer = timer
+}
+
+func DBG_switchApplyStart() { DBG_swApplyStart = CFAbsoluteTimeGetCurrent() }
+func DBG_switchApplyEnd() { DBG_swApplyEnd = CFAbsoluteTimeGetCurrent() }
+func DBG_switchDoc(_ info: String) { DBG_swDoc = info }
+func DBG_switchUpdate() {
+    DBG_swUpdates += 1
+    DBG_swLastUpdate = CFAbsoluteTimeGetCurrent()
+}
+func DBG_switchWrite() { DBG_swWrites += 1 }
+
+let mainT0 = CFAbsoluteTimeGetCurrent()
 
 // Focus is never forced from updateNSView — AppKit raises
 // NSInternalInconsistencyException for that; the subclass reports native
@@ -383,7 +483,10 @@ struct NSTextViewRepresentable: NSViewRepresentable {
     /// Text is re-applied only on revision bumps, so a stale render pass
     /// can't revert text the user just typed.
     var contentRevision: Int
-    var revision: AnyPublisher<Int, Never>
+    /// Only the HTML pane subscribes (its apply is deferred a turn); grid
+    /// cells pass nil and apply exclusively from updateNSView, so one
+    /// revision bump can't enqueue a per-cell main-queue block for 500 cells.
+    var revision: AnyPublisher<Int, Never>?
     /// Live read from the view model — never a render-time snapshot.
     var contentProvider: () -> NSAttributedString
     var isHeader: Bool
@@ -407,6 +510,10 @@ struct NSTextViewRepresentable: NSViewRepresentable {
     var highlightsSyntax = false
     var showsLineNumbers = false
     var highlightsCurrentLine = false
+    /// The source pane lands its content one turn after the grid's, so a
+    /// document switch doesn't pay its full re-layout in the same frame as
+    /// the grid's. Cell views are always false.
+    var defersContent = false
     /// Row/column commands for the context menu; nil outside the grid.
     var cellCommands: ((CellCommand) -> Void)? = nil
     /// Greys out a context-menu command the cell can't run; nil = all enabled.
@@ -433,6 +540,9 @@ struct NSTextViewRepresentable: NSViewRepresentable {
         [.font: font, .foregroundColor: NSColor.labelColor]
     }
 
+    /// Header cells get a distinct system background so the header row stays
+    /// visually separate from the body; body cells fall back to the grid's
+    /// controlBackgroundColor.
     static func background(isHeader: Bool) -> NSColor {
         isHeader ? .unemphasizedSelectedContentBackgroundColor : .controlBackgroundColor
     }
@@ -459,6 +569,10 @@ struct NSTextViewRepresentable: NSViewRepresentable {
         // Undo is owned by the shared editor manager, not the text view.
         textView.allowsUndo = false
         textView.drawsBackground = true
+        // Header cells keep a distinct system background so the header row
+        // stays visually separate from the body; body cells blend with the
+        // grid's controlBackgroundColor. `updateNSView` re-applies it only
+        // when the value actually changes.
         textView.backgroundColor = Self.background(isHeader: isHeader)
         textView.textColor = .labelColor
         textView.insertionPointColor = .labelColor
@@ -507,7 +621,7 @@ struct NSTextViewRepresentable: NSViewRepresentable {
         wire(textView: textView, coordinator: context.coordinator)
         context.coordinator.lastAppliedRevision = contentRevision
         context.coordinator.lastFocused = isFocused
-        context.coordinator.observeRevision(revision, textView: textView)
+        if let revision { context.coordinator.observeRevision(revision, textView: textView) }
         context.coordinator.refreshDecorations(textView)
         return scrollView
     }
@@ -515,14 +629,32 @@ struct NSTextViewRepresentable: NSViewRepresentable {
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
         context.coordinator.parent = self
         guard let textView = scrollView.documentView as? CellTextView else { return }
+        DBG_updateNSViewTotal += 1
+        DBG_switchUpdate()
         wire(textView: textView, coordinator: context.coordinator)
+        NSLog("DBG updateNSView wire \(DBG_t()) \(DBG_turn())")
 
-        if context.coordinator.lastAppliedRevision != contentRevision {
+        // DBG: grid-cell apply path — the publish side is logged in TableViewModel.
+        let f = scrollView.frame
+        NSLog("DBG updateNSView rev=\(contentRevision) last=\(context.coordinator.lastAppliedRevision ?? -1) f=\(Int(f.minX)),\(Int(f.minY)):\(Int(f.width))x\(Int(f.height)) \(DBG_t()) \(DBG_turn())")
+        if context.coordinator.lastAppliedRevision != contentRevision, !defersContent {
+            // DBG: one call stack per wave to see who drives each updateNSView pass.
+            if DBG_stackP1Rev != contentRevision {
+                DBG_stackP1Rev = contentRevision
+                NSLog("DBG stackP1 rev=\(contentRevision) \(Thread.callStackSymbols.prefix(28).joined(separator: " | "))")
+            }
+            // The deferred pane applies on the next turn instead, so its
+            // re-layout doesn't land in the grid's frame.
             context.coordinator.apply(content: content, revision: contentRevision, to: textView)
+            NSLog("DBG updateNSView after-apply \(DBG_t()) \(DBG_turn())")
+        } else if !defersContent, DBG_stackP2Rev != contentRevision {
+            DBG_stackP2Rev = contentRevision
+            NSLog("DBG stackP2 rev=\(contentRevision) \(Thread.callStackSymbols.prefix(28).joined(separator: " | "))")
         }
-        // The revision publisher can run apply() before this pass refreshes
-        // `parent`, so re-check the alignment here where it is guaranteed fresh.
+        // apply() skips the write when the text is unchanged, so the
+        // alignment is re-checked here where `parent` is guaranteed fresh.
         context.coordinator.applyAlignmentIfNeeded(to: textView)
+        NSLog("DBG updateNSView after-alignment \(DBG_t()) \(DBG_turn())")
 
         // Focus bridge: follow false→true grid moves only when the keyboard
         // is already in the grid; initial creation (nil→true) must not steal
@@ -538,9 +670,22 @@ struct NSTextViewRepresentable: NSViewRepresentable {
                 }
             }
         }
+        NSLog("DBG updateNSView after-focus \(DBG_t()) \(DBG_turn())")
 
-        textView.backgroundColor = Self.background(isHeader: isHeader)
-        context.coordinator.refreshDecorations(textView)
+        // Header cells keep a distinct system background so the header row
+        // stays visually separate from the body; body cells blend with the
+        // grid's controlBackgroundColor. Only write when it actually changes.
+        if !textView.backgroundColor.isEqual(Self.background(isHeader: isHeader)) {
+            textView.backgroundColor = Self.background(isHeader: isHeader)
+        }
+        NSLog("DBG updateNSView after-bg \(DBG_t()) \(DBG_turn())")
+        // The deferred pane's text only changes via the revision timer, which
+        // decorates right after applying; a syntax pass over the still-stale
+        // text here would burn ~20 ms per switch for nothing.
+        if !defersContent {
+            context.coordinator.refreshDecorations(textView)
+        }
+        NSLog("DBG updateNSView after-decorations \(DBG_t()) \(DBG_turn())")
     }
 
     private func wire(textView: CellTextView, coordinator: Coordinator) {
@@ -600,11 +745,27 @@ struct NSTextViewRepresentable: NSViewRepresentable {
                 .sink { [weak self, weak textView] revision in
                     guard let self, let textView else { return }
                     guard self.lastAppliedRevision != revision else { return }
-                    self.apply(content: self.parent.contentProvider(), revision: revision, to: textView)
+                    NSLog("DBG observeRevision rev=\(revision) defersContent=\(self.parent.defersContent) \(DBG_t()) \(DBG_turn())")
+                    if self.parent.defersContent {
+                        // Land on the next turn, after the grid's frame has
+                        // drawn, so a document switch doesn't put this pane's
+                        // full re-layout in the same frame as the grid's.
+                        let timer = Timer(timeInterval: 0, repeats: false) { [weak self, weak textView] _ in
+                            NSLog("DBG timerFire rev=\(revision) last=\(self?.lastAppliedRevision ?? -1) \(DBG_t()) \(DBG_turn())")
+                            guard let self, let textView, self.lastAppliedRevision != revision else { return }
+                            self.apply(content: self.parent.contentProvider(), revision: revision, to: textView)
+                            self.refreshDecorations(textView)
+                        }
+                        RunLoop.main.add(timer, forMode: .common)
+                    } else {
+                        self.apply(content: self.parent.contentProvider(), revision: revision, to: textView)
+                    }
                 }
         }
 
         func apply(content: NSAttributedString, revision: Int, to textView: CellTextView) {
+            // DBG: whichever path lands the content (updateNSView or observeRevision).
+            NSLog("DBG apply rev=\(revision) \(DBG_t()) \(DBG_turn())")
             lastAppliedRevision = revision
             // The storage carries the view-layer paragraph style but the model's
             // content is style-free, so compare with the style stripped to avoid
@@ -615,9 +776,23 @@ struct NSTextViewRepresentable: NSViewRepresentable {
                 applyAlignmentIfNeeded(to: textView)
                 return
             }
+            // DBG: one detailed dump of why the equality-skip failed.
+            if !DBG_eqFailLogged {
+                DBG_eqFailLogged = true
+                let stripped = Self.strippingParagraphStyle(current)
+                let a = current.length > 0 ? current.attribute(.foregroundColor, at: 0, effectiveRange: nil) : "nil"
+                let b = content.length > 0 ? content.attribute(.foregroundColor, at: 0, effectiveRange: nil) : "nil"
+                NSLog("DBG eqFail rev=\(revision) curLen=\(current.length) contLen=\(content.length) rawEqual=\(current.isEqual(content)) strippedEqual=\(stripped.isEqual(to: content)) curColor=\(a) contColor=\(b) \(DBG_t()) \(DBG_turn())")
+            }
             let savedSelection = textView.selectedRanges
             applyingProgrammaticContent = true
+            DBG_applyWrites += 1
+            DBG_switchWrite()
+            // DBG: split the write so the probe can time the text-storage swap
+            // against the moment the cell's `string` becomes readable.
+            NSLog("DBG apply write rev=\(revision) \(DBG_t()) \(DBG_turn())")
             textView.textStorage?.setAttributedString(content)
+            NSLog("DBG apply write done rev=\(revision) \(DBG_t()) \(DBG_turn())")
             // NSSelectionArray rejects empty arrays (raises, crashes) and
             // out-of-range values, e.g. after undo empties a cell.
             var selection = savedSelection.filter { $0.rangeValue.upperBound <= content.length }
@@ -626,8 +801,16 @@ struct NSTextViewRepresentable: NSViewRepresentable {
             }
             textView.selectedRanges = selection
             applyingProgrammaticContent = false
-            // The swap reset the stored style; re-apply the cell's alignment.
-            applyAlignment(to: textView)
+            // The swap reset the stored style; re-apply the alignment. A
+            // left-aligned cell needs no write — style-free content already
+            // renders left (natural) for LTR text — so skip the full-range
+            // paragraph-style pass, the biggest per-cell cost in the swap.
+            if parent.textAlignment == .left {
+                lastAppliedAlignment = .left
+            } else {
+                applyAlignment(to: textView)
+            }
+            NSLog("DBG apply end rev=\(revision) \(DBG_t()) \(DBG_turn())")
         }
 
         /// Writes the alignment into the storage (render + the source a
@@ -707,6 +890,7 @@ struct NSTextViewRepresentable: NSViewRepresentable {
         // reach the text storage, so the model, undo, and equality-skip sync
         // stay untouched.
         func refreshDecorations(_ textView: NSTextView) {
+            NSLog("DBG refreshDecorations start \(DBG_t()) \(DBG_turn())")
             if parent.highlightsSyntax, let layoutManager = textView.layoutManager {
                 let ns = textView.string as NSString
                 let full = NSRange(location: 0, length: ns.length)
@@ -714,9 +898,11 @@ struct NSTextViewRepresentable: NSViewRepresentable {
                 for (range, color) in HTMLHighlighter.colorRuns(in: textView.string) {
                     layoutManager.setTemporaryAttributes([.foregroundColor: color], forCharacterRange: range)
                 }
+                NSLog("DBG refreshDecorations syntax \(DBG_t()) \(DBG_turn())")
             }
             textView.enclosingScrollView?.verticalRulerView?.needsDisplay = true
             if parent.highlightsSyntax || parent.highlightsCurrentLine { textView.needsDisplay = true }
+            NSLog("DBG refreshDecorations end \(DBG_t()) \(DBG_turn())")
         }
     }
 }

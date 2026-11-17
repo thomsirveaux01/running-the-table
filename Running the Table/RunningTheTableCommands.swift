@@ -64,10 +64,13 @@ struct RunningTheTableCommands: Commands {
 
             Menu("Import") {
                 Button("CSV…") { viewModel.importCSV() }
+                Button("Markdown…") { viewModel.importMarkdown() }
             }
 
             Menu("Export") {
                 Button("CSV…") { viewModel.exportCSV() }
+                    .disabled(viewModel.selectedDocumentID == nil)
+                Button("Markdown…") { viewModel.exportMarkdown() }
                     .disabled(viewModel.selectedDocumentID == nil)
             }
         }
