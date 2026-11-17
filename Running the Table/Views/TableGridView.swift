@@ -1,11 +1,12 @@
 import AppKit
 import SwiftUI
 
-/// The merged-cell grid as a single AppKit view instead of a nest of SwiftUI
-/// ForEach/ZStack layers: one flipped document view hosts pooled CellTextViews
-/// (one per model cell, reused across table switches) plus the gutter strips,
-/// selection overlays, and move/resize handles, so switching tables re-points
-/// existing text views instead of rebuilding the SwiftUI tree.
+/// The merged-cell grid as one drawn view: backgrounds, borders, and text
+/// are painted straight from the model in a single draw pass, and a single
+/// shared CellTextView materializes over the focused cell for editing.
+/// Switching tables repaints one view instead of re-pointing ~50 pooled text
+/// views, which deletes the per-cell forced typesetting the pooled design
+/// paid on every click.
 ///
 /// The document view occupies the same padded-container space the SwiftUI
 /// layout drew into (1pt padding, separator-color background showing through
@@ -32,8 +33,10 @@ struct TableGridView: NSViewRepresentable {
     }
 
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
+        let tGrid = RTSwitchTrace.now  // TEMP
         context.coordinator.parent = self
         (scrollView.documentView as? GridDocumentView)?.sync()
+        RTSwitchTrace.log("grid sync dt=\(String(format: "%.1f", RTSwitchTrace.now - tGrid))ms")  // TEMP
     }
 }
 
@@ -62,20 +65,6 @@ final class GridCoordinator: NSObject, NSTextViewDelegate, NSTextFieldDelegate {
     var rowDrag = GridDragState()
     var columnDrag = GridDragState()
 
-    // Pooled per-cell clip containers keyed by model cell (the editor is
-    // their only subview; the container pins the clip width and floors the
-    // slot height — see GridCellClipView).
-    var cellViews: [GridCell: NSView] = [:]
-    // Editors dropped by a table-shape change ride here instead of being
-    // rebuilt from scratch (TextKit stack + container) on the way back.
-    var spareCells: [NSView] = []
-    var lastAppliedRevision: [GridCell: Int] = [:]
-    var lastAppliedAlignment: [GridCell: NSTextAlignment] = [:]
-    var lastFocused: [GridCell: Bool] = [:]
-    // Landing-offset memory so only changed rows animate on a preview bump.
-    var appliedRowOffsets: [Int: CGFloat] = [:]
-    var appliedColumnOffsets: [Int: CGFloat] = [:]
-
     var rowStrips: [Int: RowMoveHandleView] = [:]
     var columnStrips: [Int: ColumnMoveHandleView] = [:]
     var rowResizeHandles: [Int: GridResizeHandleView] = [:]
@@ -89,32 +78,49 @@ final class GridCoordinator: NSObject, NSTextViewDelegate, NSTextFieldDelegate {
     // callbacks; publishing those would mutate the model mid-view-update.
     var applyingProgrammaticContent = false
 
+    // Single-editor content bookkeeping (the pooled design kept one entry
+    // per cell here).
+    var lastAppliedCell: GridCell?
+    var lastAppliedRevision: Int?
+    var lastAppliedAlignment: NSTextAlignment?
+
     var viewModel: TableViewModel { parent!.viewModel }
 
-    // MARK: - Cell content / alignment (mirrors the representable's dual-path apply)
+    // MARK: - Editor content / alignment
 
-    /// Returns whether the write (or an alignment restyle) dirtied the text
-    /// view, so sync() can skip invalidating cells nothing changed.
+    /// Writes the focused cell's content into the shared editor when the cell
+    /// or revision actually moved. `caret` parks the insertion point (focus
+    /// moves); otherwise the live selection survives the swap.
     @discardableResult
-    func apply(content: NSAttributedString, revision: Int, to textView: CellTextView, alignment: NSTextAlignment) -> Bool {
-        guard let cell = textView.modelCell else { return false }
-        guard lastAppliedRevision[cell] != revision else { return false }
-        lastAppliedRevision[cell] = revision
+    func apply(content: NSAttributedString, revision: Int, to textView: CellTextView,
+               alignment: NSTextAlignment, caret: NSRange? = nil) -> Bool {
+        guard textView.modelCell != nil else { return false }
+        if lastAppliedCell == textView.modelCell, lastAppliedRevision == revision {
+            let restyled = applyAlignmentIfNeeded(to: textView, alignment: alignment)
+            if let caret { textView.setSelectedRange(caret) }
+            return restyled
+        }
+        lastAppliedCell = textView.modelCell
+        lastAppliedRevision = revision
         // The storage carries the view-layer paragraph style but the model's
         // content is style-free, so compare with the style stripped to avoid
         // a swap (and IME-interrupting reset) on every revision bump.
         let current = textView.textStorage ?? NSAttributedString()
         if NSTextViewRepresentable.Coordinator.strippingParagraphStyle(current).isEqual(to: content) {
-            return applyAlignmentIfNeeded(to: textView, alignment: alignment)
+            applyAlignmentIfNeeded(to: textView, alignment: alignment)
+            if let caret { textView.setSelectedRange(caret) }
+            return false
         }
         let savedSelection = textView.selectedRanges
-        // Selection is only ever visible on the focused editor; restoring it
-        // on the other ~40 cells per switch was pure layout work. Writing
-        // leaves an unfocused editor at location 0, which is invisible.
-        let restoreSelection = textView.window?.firstResponder === textView
         applyingProgrammaticContent = true
         textView.textStorage?.setAttributedString(content)
-        if restoreSelection {
+        if let caret {
+            // NSIntersectionRange drops a zero-length caret sitting exactly
+            // at maxRange (measured), so clamp the caret by hand.
+            let loc = min(max(caret.location, 0), content.length)
+            let len = max(min(caret.length, content.length - loc), 0)
+            textView.selectedRanges = [NSValue(range: NSRange(location: loc, length: len))]
+        } else if textView.window?.firstResponder === textView {
             // NSSelectionArray rejects empty arrays (raises, crashes) and
             // out-of-range values, e.g. after undo empties a cell.
             var selection = savedSelection.filter { $0.rangeValue.upperBound <= content.length }
@@ -128,7 +134,7 @@ final class GridCoordinator: NSObject, NSTextViewDelegate, NSTextFieldDelegate {
         // renders left for LTR text — so skip the full-range paragraph-style
         // pass, the biggest per-cell cost in the swap.
         if alignment == .left {
-            lastAppliedAlignment[cell] = .left
+            lastAppliedAlignment = .left
         } else {
             applyAlignment(to: textView, alignment: alignment)
         }
@@ -136,8 +142,7 @@ final class GridCoordinator: NSObject, NSTextViewDelegate, NSTextFieldDelegate {
     }
 
     func applyAlignment(to textView: CellTextView, alignment: NSTextAlignment) {
-        guard let cell = textView.modelCell else { return }
-        lastAppliedAlignment[cell] = alignment
+        lastAppliedAlignment = alignment
         guard let storage = textView.textStorage else { return }
         let style = NSMutableParagraphStyle()
         style.alignment = alignment
@@ -155,12 +160,12 @@ final class GridCoordinator: NSObject, NSTextViewDelegate, NSTextFieldDelegate {
 
     @discardableResult
     func applyAlignmentIfNeeded(to textView: CellTextView, alignment: NSTextAlignment) -> Bool {
-        guard let cell = textView.modelCell, lastAppliedAlignment[cell] != alignment else { return false }
+        guard lastAppliedAlignment != alignment else { return false }
         applyAlignment(to: textView, alignment: alignment)
         return true
     }
 
-    // MARK: - NSTextViewDelegate (shared across all pooled cells)
+    // MARK: - NSTextViewDelegate (the one shared editor)
 
     func textDidChange(_ notification: Notification) {
         guard !applyingProgrammaticContent else { return }
@@ -201,12 +206,10 @@ final class GridCoordinator: NSObject, NSTextViewDelegate, NSTextFieldDelegate {
     }
 }
 
-/// The cell's clipping container: a plain layer-backed view that pins its
-/// editor to the slot and clips overflow. The per-cell NSScrollView wrapper
-/// it replaces added a scroll view and clip view per cell — tiling,
-/// tracking-area, and wheel machinery the display cycle walked every
-/// toggle — only to be told never to scroll. The wheel now rides the
-/// responder chain from the editor straight up to the grid's scroll view.
+/// The shared editor's clip container: a plain layer-backed view that pins
+/// the editor to the focused cell's slot and clips overflow. One instance
+/// serves the whole grid; the wheel rides the responder chain from the
+/// editor straight up to the grid's scroll view.
 final class GridCellClipView: NSView {
     override var isFlipped: Bool { true }
 
@@ -259,116 +262,186 @@ final class GridDocumentView: NSView {
     weak var coordinator: GridCoordinator?
     override var isFlipped: Bool { true }
 
+    // The pooled text views accepted first-mouse clicks into an inactive
+    // window; the bare document view must keep that or the first click on a
+    // background window would only activate it.
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
     private var geometry: GridGeometry? {
         guard let coordinator else { return nil }
         return GridGeometry(viewModel: coordinator.viewModel)
     }
 
+    // MARK: - Shared editor
+
+    /// The grid's only text view: parked over the focused cell while editing,
+    /// transparent so the drawn cell (background and border) shows through.
+    private(set) lazy var editor: CellTextView = makeEditor()
+    private lazy var editorClip = GridCellClipView()
+    private var editorCell: GridCell?
+    private var wiredEditor = false
+    private var settleTimer: Timer?
+
+    // Drawing stack mirroring the editor's TextKit metrics (3pt container
+    // inset, 5pt line-fragment padding) so drawn and edited text land
+    // identically — the same box requiredHeight measures.
+    private static let textInset: CGFloat = 3
+    private let drawStorage = NSTextStorage()
+    private lazy var drawLayout: NSLayoutManager = {
+        let layout = NSLayoutManager()
+        drawStorage.addLayoutManager(layout)
+        layout.addTextContainer(drawContainer)
+        return layout
+    }()
+    private lazy var drawContainer: NSTextContainer = {
+        let container = NSTextContainer(size: NSSize(width: 100, height: CGFloat.greatestFiniteMagnitude))
+        container.lineFragmentPadding = 5
+        return container
+    }()
+
+    // Last-drawn state, so sync() dirties only real changes instead of the
+    // whole grid on every keystroke.
+    private var drawnContents: [GridCell: NSAttributedString] = [:]
+    private var drawnStyles: [GridCell: NSTextAlignment] = [:]
+    private var drawnHeaderFlags: [GridCell: Bool] = [:]
+    private var drawnFrames: [GridCell: NSRect] = [:]
+    private var drawnLayoutKey = -1
+    private var drawnFocused: GridCell?
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        editorClip.addSubview(editor)
+        addSubview(editorClip)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+
+    // MARK: - Painting
+
     override func draw(_ dirtyRect: NSRect) {
+        RTSwitchTrace.log("gridDraw")  // TEMP
         let geom = geometry
         // The padded container's separator tint shows through every 1pt gap;
         // the top-left corner box (and caption gutter) is control-colored.
         NSColor.controlBackgroundColor.setFill()
         bounds.fill()
-        if let geom {
-            NSColor.separatorColor.setFill()
-            NSRect(origin: .zero, size: geom.blockSize).fill()
-            NSColor.controlBackgroundColor.setFill()
-            NSRect(x: 0, y: 0, width: geom.gridLeftEdge, height: geom.gridTopEdge).fill()
+        guard let geom, let coordinator else { return }
+        NSColor.separatorColor.setFill()
+        NSRect(origin: .zero, size: geom.blockSize).fill()
+        NSColor.controlBackgroundColor.setFill()
+        NSRect(x: 0, y: 0, width: geom.gridLeftEdge, height: geom.gridTopEdge).fill()
+
+        let viewModel = coordinator.viewModel
+        let focused = viewModel.focusedCell
+        for (row, slots) in viewModel.cachedPlacements.enumerated() {
+            for p in slots {
+                let cellKey = GridCell(row: row, column: p.cellIndex)
+                let rect = geom.cellRect(row: row, placement: p, coordinator: coordinator)
+                guard rect.intersects(dirtyRect),
+                      let cell = viewModel.cell(row: row, col: p.cellIndex) else { continue }
+                let isFocused = focused == cellKey
+                let lifted = coordinator.columnDrag.dragged == p.startCol
+                if lifted { NSGraphicsContext.saveGraphicsState() }
+                if lifted { NSGraphicsContext.current?.cgContext.setAlpha(0.5) }
+
+                NSTextViewRepresentable.background(isHeader: cell.isHeader).setFill()
+                rect.fill()
+                // The editor paints the focused cell's text; drawing it here
+                // too would double-render (and force layout while typing).
+                if !isFocused {
+                    drawCellText(cell.content, alignment: cell.alignment, in: rect)
+                }
+                let borderW: CGFloat = isFocused ? 2 : 1
+                (isFocused ? NSColor.controlAccentColor : NSColor.separatorColor).setStroke()
+                let half = borderW / 2
+                let path = NSBezierPath(rect: rect.insetBy(dx: half, dy: half))
+                path.lineWidth = borderW
+                path.stroke()
+
+                if lifted { NSGraphicsContext.restoreGraphicsState() }
+            }
         }
     }
+
+    /// Lays out one cell's text in the shared stack and paints it clipped to
+    /// the slot, at the editor's exact container origin.
+    private func drawCellText(_ content: NSAttributedString, alignment: NSTextAlignment, in rect: NSRect) {
+        guard content.length > 0 else { return }
+        let inset = Self.textInset
+        let styled = NSMutableAttributedString(attributedString: content)
+        if alignment != .left {
+            let style = NSMutableParagraphStyle()
+            style.alignment = alignment
+            styled.addAttribute(.paragraphStyle, value: style,
+                                range: NSRange(location: 0, length: styled.length))
+        }
+        drawStorage.setAttributedString(styled)
+        drawContainer.size = NSSize(width: max(rect.width - 2 * inset, 1),
+                                    height: .greatestFiniteMagnitude)
+        let glyphs = drawLayout.glyphRange(for: drawContainer)
+        guard glyphs.length > 0 else { return }
+        NSGraphicsContext.saveGraphicsState()
+        NSBezierPath(rect: rect).addClip()
+        drawLayout.drawGlyphs(forGlyphRange: glyphs,
+                              at: NSPoint(x: rect.minX + inset, y: rect.minY + inset))
+        NSGraphicsContext.restoreGraphicsState()
+    }
+
+    // MARK: - Sync
 
     @MainActor
     func sync() {
         guard let coordinator else { return }
         let viewModel = coordinator.viewModel
         let geom = GridGeometry(viewModel: viewModel)
-        setFrameSize(geom.blockSize)
-        needsDisplay = true
+        if frame.size != geom.blockSize { setFrameSize(geom.blockSize) }
 
-        let placements = viewModel.table.placements()
-        let liveCells: Set<GridCell> = Set(placements.enumerated().flatMap { row, slots in
-            slots.map { GridCell(row: row, column: $0.cellIndex) }
-        })
+        let key = layoutKey(geom: geom, coordinator: coordinator)
+        var fullRedraw = key != drawnLayoutKey
+        if fullRedraw { drawnLayoutKey = key }
 
-        // Drop pooled editors whose cell vanished with the last table.
-        for (cell, view) in coordinator.cellViews where !liveCells.contains(cell) {
-            view.removeFromSuperview()
-            coordinator.cellViews.removeValue(forKey: cell)
-            coordinator.lastAppliedRevision[cell] = nil
-            coordinator.lastAppliedAlignment[cell] = nil
-            coordinator.lastFocused[cell] = nil
-            if coordinator.spareCells.count < 48 { coordinator.spareCells.append(view) }
-        }
-
-        var liftedCells: [NSView] = []
-        for (row, slots) in placements.enumerated() {
+        var contents: [GridCell: NSAttributedString] = [:]
+        var styles: [GridCell: NSTextAlignment] = [:]
+        var headers: [GridCell: Bool] = [:]
+        var frames: [GridCell: NSRect] = [:]
+        for (row, slots) in viewModel.cachedPlacements.enumerated() {
             for p in slots {
-                let key = GridCell(row: row, column: p.cellIndex)
+                let cellKey = GridCell(row: row, column: p.cellIndex)
                 guard let cell = viewModel.cell(row: row, col: p.cellIndex) else { continue }
-                let scroll: NSView
-                if let existing = coordinator.cellViews[key] {
-                    scroll = existing
-                } else {
-                    scroll = makeCellContainer(key: key, coordinator: coordinator)
-                    coordinator.cellViews[key] = scroll
-                    addSubview(scroll)
-                }
-                let slotRect = geom.cellRect(row: row, placement: p, coordinator: coordinator)
-                if scroll.frame != slotRect { scroll.frame = slotRect }
-                guard let textView = scroll.subviews.first as? CellTextView else { continue }
-                textView.modelCell = key
-                textView.modelStartCol = p.startCol
-                textView.gridVisualOrigin = VisualCell(row: row, column: p.startCol)
-                textView.gridVisualSpan = p.colSpan
-                textView.gridVisualRowSpan = p.rowSpan
-                textView.visualCellAt = { [weak viewModel] point in
-                    guard let viewModel else { return nil }
-                    let geom = GridGeometry(viewModel: viewModel)
-                    return WYSIWYGView.visualCell(at: point,
-                                                  columnWidths: viewModel.columnWidths,
-                                                  rowHeights: viewModel.rowHeights,
-                                                  captionOffset: geom.captionBandHeight)
-                }
-                let background = NSTextViewRepresentable.background(isHeader: cell.isHeader)
-                let bgChanged = !textView.backgroundColor.isEqual(background)
-                if bgChanged { textView.backgroundColor = background }
-                let wrote = coordinator.apply(content: cell.content, revision: viewModel.contentRevision,
-                                              to: textView, alignment: cell.alignment)
-                // Per-cell focus border (was CellView's strokeBorder overlay).
-                let focused = viewModel.focusedCell == key
-                let borderW: CGFloat = focused ? 2 : 1
-                let borderC: NSColor = focused ? .controlAccentColor : .separatorColor
-                let borderChanged = textView.gridBorderWidth != borderW
-                    || !(textView.gridBorderColor?.isEqual(borderC) ?? false)
-                textView.gridBorderColor = borderC
-                textView.gridBorderWidth = borderW
-                let lifted = isLifted(row: row, startCol: p.startCol, coordinator: coordinator)
-                scroll.alphaValue = coordinator.columnDrag.dragged == p.startCol ? 0.5 : 1
-                // Only a real change dirties the editor: forcing needsDisplay
-                // on every cell every sync redrew the whole grid per switch
-                // and forced synchronous glyph layout via the dirty-rect math.
-                if wrote || borderChanged || bgChanged { textView.needsDisplay = true }
-                if lifted { liftedCells.append(scroll) }
-
-                // Focus bridge: follow false→true grid moves only when the
-                // keyboard is already in the grid; initial creation (nil→true)
-                // must not steal focus, preserving the click-to-edit contract.
-                let wasFocused = coordinator.lastFocused[key]
-                coordinator.lastFocused[key] = focused
-                if focused, wasFocused == false,
-                   window?.firstResponder is CellTextView, window?.firstResponder !== textView {
-                    DispatchQueue.main.async { [weak self, weak textView] in
-                        guard let self, let textView,
-                              self.window?.firstResponder is CellTextView,
-                              self.window?.firstResponder !== textView else { return }
-                        self.window?.makeFirstResponder(textView)
-                    }
-                }
+                contents[cellKey] = cell.content
+                styles[cellKey] = cell.alignment
+                headers[cellKey] = cell.isHeader
+                frames[cellKey] = geom.cellRect(row: row, placement: p, coordinator: coordinator)
             }
         }
-        liftedCells.forEach { addSubview($0) }
+        if !fullRedraw {
+            if Set(contents.keys) != Set(drawnContents.keys) {
+                fullRedraw = true
+            } else {
+                for (cellKey, content) in contents where
+                    drawnContents[cellKey]?.isEqual(to: content) != true
+                    || drawnStyles[cellKey] != styles[cellKey]
+                    || drawnHeaderFlags[cellKey] != headers[cellKey]
+                    || drawnFrames[cellKey] != frames[cellKey] {
+                    if let old = drawnFrames[cellKey] { setNeedsDisplay(old) }
+                    if let fresh = frames[cellKey] { setNeedsDisplay(fresh) }
+                }
+                // Focus moves repaint both ends: the cell the editor left
+                // must regain its drawn text, and both borders change.
+                if let previous = drawnFocused, previous != viewModel.focusedCell,
+                   let rect = frames[previous] ?? drawnFrames[previous] { setNeedsDisplay(rect) }
+                if let focus = viewModel.focusedCell, focus != drawnFocused,
+                   let rect = frames[focus] { setNeedsDisplay(rect) }
+            }
+        }
+        drawnContents = contents
+        drawnStyles = styles
+        drawnHeaderFlags = headers
+        drawnFrames = frames
+        drawnFocused = viewModel.focusedCell
+        if fullRedraw { needsDisplay = true }
 
+        placeEditor(geom: geom, coordinator: coordinator)
         syncCaption(geom: geom, viewModel: viewModel, coordinator: coordinator)
         syncRowStrips(geom: geom, coordinator: coordinator)
         syncColumnStrips(geom: geom, coordinator: coordinator)
@@ -378,19 +451,127 @@ final class GridDocumentView: NSView {
         restoreStackingOrder()
     }
 
-    /// Builds the pooled per-cell container: a plain clipping view whose one
-    /// subview is the editor, pinning the clip width and the slot height;
-    /// the wheel rides the responder chain up to the grid's scroll view.
+    /// Quantized fingerprint of everything that repaints every cell at once:
+    /// column/row sizes, the caption band, and live drag offsets. Content and
+    /// focus changes are tracked per cell instead, so typing dirties one cell.
+    private func layoutKey(geom: GridGeometry, coordinator: GridCoordinator) -> Int {
+        var key = Int(geom.captionBandHeight * 4)
+        for h in coordinator.viewModel.rowHeights { key = key &* 31 &+ Int(h * 4) }
+        for w in coordinator.viewModel.columnWidths { key = key &* 31 &+ Int(w * 4) }
+        key = key &* 31 &+ Int(coordinator.rowDrag.settleOffset * 4)
+        key = key &* 31 &+ Int(coordinator.columnDrag.settleOffset * 4)
+        key = key &* 31 &+ (coordinator.columnDrag.dragged ?? -1)
+        return key
+    }
+
+    // MARK: - Editor placement
+
+    /// Parks the shared editor over the focused cell, re-pointing its content
+    /// when focus moved. Also called by the drag appliers so the editor rides
+    /// its cell through previews and the settle spring.
     @MainActor
-    private func makeCellContainer(key: GridCell, coordinator: GridCoordinator) -> NSView {
-        // A stashed editor re-points as-is: sync resets the modelCell and
-        // spans, apply() re-checks content, and stale revisions were cleared
-        // when the view was dropped.
-        if let spare = coordinator.spareCells.popLast(),
-           let editor = spare.subviews.first as? CellTextView {
-            editor.selectedRanges = [NSValue(range: NSRange(location: 0, length: 0))]
-            return spare
+    private func placeEditor(geom: GridGeometry, coordinator: GridCoordinator) {
+        let viewModel = coordinator.viewModel
+        guard let focused = viewModel.focusedCell,
+              let (row, placement) = Self.placement(of: focused, in: viewModel.cachedPlacements) else {
+            editorClip.isHidden = true
+            editorCell = nil
+            editor.modelCell = nil
+            return
         }
+        if !wiredEditor {
+            wireEditor(coordinator: coordinator)
+            wiredEditor = true
+        }
+        editor.delegate = coordinator
+        let cellChanged = editorCell != focused
+        editorCell = focused
+        editor.modelCell = focused
+        editor.modelStartCol = placement.startCol
+        editor.gridVisualOrigin = VisualCell(row: row, column: placement.startCol)
+        editor.gridVisualSpan = placement.colSpan
+        editor.gridVisualRowSpan = placement.rowSpan
+        editor.visualCellAt = { [weak coordinator] point in
+            guard let coordinator else { return nil }
+            let geom = GridGeometry(viewModel: coordinator.viewModel)
+            return WYSIWYGView.visualCell(at: point,
+                                          columnWidths: coordinator.viewModel.columnWidths,
+                                          rowHeights: coordinator.viewModel.rowHeights,
+                                          captionOffset: geom.captionBandHeight)
+        }
+        let rect = geom.cellRect(row: row, placement: placement, coordinator: coordinator)
+        if editorClip.frame != rect { editorClip.frame = rect }
+        editorClip.isHidden = false
+        let model = viewModel.cell(row: focused.row, col: focused.column)
+        coordinator.apply(content: model?.content ?? NSAttributedString(),
+                          revision: viewModel.contentRevision,
+                          to: editor, alignment: model?.alignment ?? .left,
+                          caret: cellChanged
+                              ? NSRange(location: (model?.content.length ?? 0), length: 0) : nil)
+    }
+
+    static func placement(of cell: GridCell, in placements: [[Table.CellPlacement]]) -> (Int, Table.CellPlacement)? {
+        guard cell.row >= 0, cell.row < placements.count else { return nil }
+        guard let p = placements[cell.row].first(where: { $0.cellIndex == cell.column }) else { return nil }
+        return (cell.row, p)
+    }
+
+    /// The editor is created once; handlers read `modelCell` at fire time,
+    /// so re-pointing it across focus or table switches keeps reporting the
+    /// right cell.
+    private func wireEditor(coordinator: GridCoordinator) {
+        let viewModel = coordinator.viewModel
+        editor.undoManagerOverride = viewModel.undoManager
+        editor.didBecomeFirstResponderHandler = { [weak editor, weak viewModel] in
+            guard let cell = editor?.modelCell else { return }
+            viewModel?.focusedCell = cell
+        }
+        editor.flushPendingEditsHandler = { [weak viewModel] in
+            viewModel?.closeTypingGroup()
+        }
+        editor.keyCommandHandler = { [weak editor, weak viewModel] event in
+            guard let cell = editor?.modelCell else { return false }
+            return viewModel?.handleGridKey(event, from: cell) ?? false
+        }
+        editor.cellCommandHandler = { [weak editor, weak viewModel] command in
+            guard let cell = editor?.modelCell else { return }
+            switch command {
+            case .addRowAbove: viewModel?.addRow(adjacentTo: cell, after: false)
+            case .addRowBelow: viewModel?.addRow(adjacentTo: cell, after: true)
+            case .addColumnLeft: viewModel?.addColumn(adjacentTo: cell, after: false)
+            case .addColumnRight: viewModel?.addColumn(adjacentTo: cell, after: true)
+            case .duplicateRow: viewModel?.duplicateRow(adjacentTo: cell, after: true)
+            case .duplicateColumn: viewModel?.duplicateColumn(adjacentTo: cell, after: true)
+            }
+        }
+        editor.cellCommandValidator = { [weak editor, weak viewModel] command in
+            guard let cell = editor?.modelCell else { return true }
+            switch command {
+            case .duplicateRow: return viewModel?.canDuplicateRow(cell.row) ?? true
+            case .duplicateColumn: return viewModel?.canDuplicateColumn(editor?.modelStartCol ?? cell.column) ?? true
+            default: return true
+            }
+        }
+        editor.cellRangeHandler = { [weak viewModel] range in
+            viewModel?.cellSelection = range
+        }
+        editor.copyCellsHandler = { [weak viewModel] in
+            viewModel?.copySelectedCells() ?? false
+        }
+        editor.pasteTableHandler = { [weak viewModel] in
+            viewModel?.pasteTableFromPasteboardIfTable() ?? false
+        }
+        editor.colspanCurrent = { [weak editor, weak viewModel] in
+            guard let cell = editor?.modelCell else { return 1 }
+            return viewModel?.cell(row: cell.row, col: cell.column)?.colspan ?? 1
+        }
+        editor.colspanSet = { [weak editor, weak viewModel] span in
+            guard let cell = editor?.modelCell else { return }
+            viewModel?.setColspan(span, for: cell)
+        }
+    }
+
+    private func makeEditor() -> CellTextView {
         // Explicit TextKit 1 stack at creation: touching .layoutManager on a
         // default (TextKit 2) view switches layout systems mid-setup and the
         // layer-backed view then renders blank. Temporary attributes need TK1.
@@ -401,14 +582,14 @@ final class GridDocumentView: NSView {
         container.widthTracksTextView = true
         layoutManager.addTextContainer(container)
         let textView = CellTextView(frame: .zero, textContainer: container)
-        textView.delegate = coordinator
         textView.isEditable = true
         textView.isSelectable = true
         textView.isRichText = true
         // Undo is owned by the shared editor manager, not the text view.
         textView.allowsUndo = false
-        textView.drawsBackground = true
-        textView.backgroundColor = .controlBackgroundColor
+        // The document paints the cell's background and border; the editor
+        // must stay transparent or it would mask them.
+        textView.drawsBackground = false
         textView.textColor = .labelColor
         textView.insertionPointColor = .labelColor
         let font = NSFont.systemFont(ofSize: NSFont.systemFontSize)
@@ -425,67 +606,78 @@ final class GridDocumentView: NSView {
         textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
         textView.isHorizontallyResizable = false
         textView.isVerticallyResizable = true
-        // The container sizes the editor; autoresizing would fight it.
+        // The clip container sizes the editor; autoresizing would fight it.
         textView.autoresizingMask = []
         textView.textContainer?.widthTracksTextView = true
-        wireCell(textView, coordinator: coordinator)
-        let clip = GridCellClipView()
-        clip.addSubview(textView)
-        return clip
+        return textView
     }
 
-    /// Handlers read `modelCell` at fire time, so a pooled view that lands on
-    /// a different cell after a table switch keeps reporting the right one.
-    private func wireCell(_ textView: CellTextView, coordinator: GridCoordinator) {
-        let viewModel = coordinator.viewModel
-        textView.undoManagerOverride = viewModel.undoManager
-        textView.didBecomeFirstResponderHandler = { [weak textView, weak viewModel] in
-            guard let cell = textView?.modelCell else { return }
-            viewModel?.focusedCell = cell
+    // MARK: - Mouse
+
+    /// Clicks reach the document view only outside the editor (it covers the
+    /// focused cell): focus the hit cell, park the editor there, then hand
+    /// the click to it so the caret lands where the user clicked and
+    /// double-click word-select still works.
+    override func mouseDown(with event: NSEvent) {
+        guard let coordinator, let geom = geometry else { return }
+        let point = convert(event.locationInWindow, from: nil)
+        guard let (row, placement) = cellRow(at: point, geom: geom, coordinator: coordinator) else { return }
+        let target = GridCell(row: row, column: placement.cellIndex)
+        if coordinator.viewModel.focusedCell != target {
+            coordinator.viewModel.focusedCell = target
         }
-        textView.flushPendingEditsHandler = { [weak viewModel] in
-            viewModel?.closeTypingGroup()
+        placeEditor(geom: geom, coordinator: coordinator)
+        window?.makeFirstResponder(editor)
+        // Event locations are window-based; the editor converts from the
+        // window itself, so the hit-test point needs no re-basing.
+        editor.mouseDown(with: event)
+    }
+
+    /// Right-click must offer the clicked cell's menu even when focus sits
+    /// elsewhere: re-point the editor, then forward. Keyboard focus is not
+    /// claimed — the menu targets the editor directly.
+    override func rightMouseDown(with event: NSEvent) {
+        guard let coordinator, let geom = geometry else { return }
+        let point = convert(event.locationInWindow, from: nil)
+        guard let (row, placement) = cellRow(at: point, geom: geom, coordinator: coordinator) else { return }
+        let target = GridCell(row: row, column: placement.cellIndex)
+        if coordinator.viewModel.focusedCell != target {
+            coordinator.viewModel.focusedCell = target
         }
-        textView.keyCommandHandler = { [weak textView, weak viewModel] event in
-            guard let cell = textView?.modelCell else { return false }
-            return viewModel?.handleGridKey(event, from: cell) ?? false
-        }
-        textView.cellCommandHandler = { [weak textView, weak viewModel] command in
-            guard let cell = textView?.modelCell else { return }
-            switch command {
-            case .addRowAbove: viewModel?.addRow(adjacentTo: cell, after: false)
-            case .addRowBelow: viewModel?.addRow(adjacentTo: cell, after: true)
-            case .addColumnLeft: viewModel?.addColumn(adjacentTo: cell, after: false)
-            case .addColumnRight: viewModel?.addColumn(adjacentTo: cell, after: true)
-            case .duplicateRow: viewModel?.duplicateRow(adjacentTo: cell, after: true)
-            case .duplicateColumn: viewModel?.duplicateColumn(adjacentTo: cell, after: true)
+        placeEditor(geom: geom, coordinator: coordinator)
+        editor.rightMouseDown(with: event)
+    }
+
+    /// Top-down scan: a point inside a rowspan cell's tall rect belongs to
+    /// the origin's slot, and covered rows hold no own slot there.
+    private func cellRow(at point: NSPoint, geom: GridGeometry,
+                         coordinator: GridCoordinator) -> (Int, Table.CellPlacement)? {
+        for (row, slots) in coordinator.viewModel.cachedPlacements.enumerated() {
+            for p in slots where geom.cellRect(row: row, placement: p, coordinator: coordinator).contains(point) {
+                return (row, p)
             }
         }
-        textView.cellCommandValidator = { [weak textView, weak viewModel] command in
-            guard let cell = textView?.modelCell else { return true }
-            switch command {
-            case .duplicateRow: return viewModel?.canDuplicateRow(cell.row) ?? true
-            case .duplicateColumn: return viewModel?.canDuplicateColumn(textView?.modelStartCol ?? cell.column) ?? true
-            default: return true
+        return nil
+    }
+
+    /// Probe hook: every drawn visual cell's document-coordinate frame.
+    @MainActor
+    func debugVisualFrames() -> [(visual: VisualCell, cell: GridCell, frame: NSRect)] {
+        guard let coordinator else { return [] }
+        let geom = GridGeometry(viewModel: coordinator.viewModel)
+        return coordinator.viewModel.cachedPlacements.enumerated().flatMap { row, slots in
+            slots.map {
+                (VisualCell(row: row, column: $0.startCol), GridCell(row: row, column: $0.cellIndex),
+                 geom.cellRect(row: row, placement: $0, coordinator: coordinator))
             }
         }
-        textView.cellRangeHandler = { [weak viewModel] range in
-            viewModel?.cellSelection = range
-        }
-        textView.copyCellsHandler = { [weak viewModel] in
-            viewModel?.copySelectedCells() ?? false
-        }
-        textView.pasteTableHandler = { [weak viewModel] in
-            viewModel?.pasteTableFromPasteboardIfTable() ?? false
-        }
-        textView.colspanCurrent = { [weak textView, weak viewModel] in
-            guard let cell = textView?.modelCell else { return 1 }
-            return viewModel?.cell(row: cell.row, col: cell.column)?.colspan ?? 1
-        }
-        textView.colspanSet = { [weak textView, weak viewModel] span in
-            guard let cell = textView?.modelCell else { return }
-            viewModel?.setColspan(span, for: cell)
-        }
+    }
+
+    /// Probe hook: the text the paint pass will draw per cell, straight from
+    /// the last sync — proves a switch pushed new content into the draw stack.
+    @MainActor
+    func debugDrawnText() -> [GridCell: String] {
+        drawnContents.mapValues { $0.string }
     }
 
     // MARK: - Caption
@@ -686,7 +878,7 @@ final class GridDocumentView: NSView {
         }
     }
 
-    /// Keeps the z-order the SwiftUI tree implied: cells (lifted last), then
+    /// Keeps the z-order the SwiftUI tree implied: editor (bottom), then
     /// strips/handles, then highlights, then the selection border on top.
     /// Re-adding an existing subview moves it to the front.
     private func restoreStackingOrder() {
@@ -701,63 +893,68 @@ final class GridDocumentView: NSView {
         if let border = coordinator.selectionBorder { addSubview(border) }
     }
 
-    private func isLifted(row: Int, startCol: Int, coordinator: GridCoordinator) -> Bool {
-        if coordinator.rowDrag.dragged == row { return true }
-        if coordinator.rowDrag.settleSlot == row && abs(coordinator.rowDrag.settleOffset) > 0.5 { return true }
-        if coordinator.columnDrag.dragged == startCol { return true }
-        if coordinator.columnDrag.settleSlot == startCol && abs(coordinator.columnDrag.settleOffset) > 0.5 { return true }
-        return false
-    }
-
     // MARK: - Drag frame application (called by the handle views)
 
     @MainActor
     func applyRowDragFrames(animated: Bool, coordinator: GridCoordinator) {
         guard let geom = geometry else { return }
-        let rowCount = coordinator.viewModel.table.rows.count
-        for row in 0..<rowCount {
+        let viewModel = coordinator.viewModel
+        for row in 0..<viewModel.table.rows.count {
             let offset = geom.rowOffset(row, coordinator: coordinator)
-            let changed = coordinator.appliedRowOffsets[row] != offset
-            coordinator.appliedRowOffsets[row] = offset
-            guard changed else { continue }
             if let strip = coordinator.rowStrips[row] {
-                let f = strip.frame
-                let base = geom.gridTopEdge + geom.localRowTop(row)
-                animate(strip, fromY: f.origin.y, toY: base + offset, animated: animated)
-            }
-            for (cell, view) in coordinator.cellViews where cell.row == row {
-                let f = view.frame
-                let baseY = geom.gridTopEdge + geom.localRowTop(row)
-                animate(view, fromY: f.origin.y, toY: baseY + offset, animated: animated)
+                animate(strip, toY: geom.gridTopEdge + geom.localRowTop(row) + offset, animated: animated)
             }
         }
         syncGapHighlights(geom: geom, coordinator: coordinator)
+        placeEditor(geom: geom, coordinator: coordinator)
         needsDisplay = true
     }
 
     @MainActor
     func applyColumnDragFrames(animated: Bool, coordinator: GridCoordinator) {
         guard let geom = geometry else { return }
-        let colCount = coordinator.viewModel.columnWidths.count
-        for col in 0..<colCount {
+        let viewModel = coordinator.viewModel
+        for col in 0..<viewModel.columnWidths.count {
             let shift = geom.columnShift(col, coordinator: coordinator)
-            let changed = coordinator.appliedColumnOffsets[col] != shift
-            coordinator.appliedColumnOffsets[col] = shift
-            guard changed else { continue }
             if let strip = coordinator.columnStrips[col] {
-                let f = strip.frame
-                let base = geom.gridLeftEdge + geom.localColumnLeft(col)
-                animate(strip, fromX: f.origin.x, toX: base + shift, animated: animated)
-            }
-            for (_, scroll) in coordinator.cellViews where (scroll.subviews.first as? CellTextView)?.gridVisualOrigin?.column == col {
-                let f = scroll.frame
-                let baseX = geom.gridLeftEdge + geom.localColumnLeft(col)
-                animate(scroll, fromX: f.origin.x, toX: baseX + shift, animated: animated)
-                scroll.alphaValue = coordinator.columnDrag.dragged == col ? 0.5 : 1
+                animate(strip, toX: geom.gridLeftEdge + geom.localColumnLeft(col) + shift, animated: animated)
             }
         }
         syncGapHighlights(geom: geom, coordinator: coordinator)
+        placeEditor(geom: geom, coordinator: coordinator)
         needsDisplay = true
+    }
+
+    /// Springs the settle offset home at 60 Hz: the commit relays rows
+    /// instantly, so pin the dropped row at its visual position and ease it
+    /// into the new slot before clearing the settle pin.
+    @MainActor
+    func startSettle(vertical: Bool, coordinator: GridCoordinator) {
+        settleTimer?.invalidate()
+        let drag = vertical ? coordinator.rowDrag : coordinator.columnDrag
+        guard drag.settleSlot != nil else { return }
+        let from = drag.settleOffset
+        let start = Date()
+        settleTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0, repeats: true) { [weak self] timer in
+            MainActor.assumeIsolated {
+                guard let self, let coordinator = self.coordinator else { timer.invalidate(); return }
+                let drag = vertical ? coordinator.rowDrag : coordinator.columnDrag
+                let t = min(max(Date().timeIntervalSince(start) / 0.3, 0), 1)
+                let eased = 1 - (1 - t) * (1 - t)
+                drag.settleOffset = from * CGFloat(1 - eased)
+                if vertical {
+                    self.applyRowDragFrames(animated: false, coordinator: coordinator)
+                } else {
+                    self.applyColumnDragFrames(animated: false, coordinator: coordinator)
+                }
+                if t >= 1 {
+                    timer.invalidate()
+                    drag.settleSlot = nil
+                    drag.settleOffset = 0
+                    self.sync()
+                }
+            }
+        }
     }
 
     private var viewModel: TableViewModel? { coordinator?.viewModel }
@@ -798,6 +995,10 @@ final class GapHighlightView: NSView {
         NSColor.controlAccentColor.withAlphaComponent(0.28).setFill()
         NSBezierPath(roundedRect: bounds, xRadius: 2, yRadius: 2).fill()
     }
+
+    // Paint-only overlays must not swallow the clicks meant for the cells
+    // (or editor) underneath them.
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
 }
 
 final class SelectionBorderView: NSView {
@@ -809,6 +1010,8 @@ final class SelectionBorderView: NSView {
         path.lineWidth = 2
         path.stroke()
     }
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
 }
 
 // MARK: - Move handles (gutter strips)
@@ -924,20 +1127,18 @@ final class RowMoveHandleView: NSView {
                     coordinator.rowDrag.reset()
                     coordinator.rowDrag.dragged = self?.row
                     coordinator.rowDrag.target = self?.row
-                    coordinator.appliedRowOffsets.removeAll()
                 }
                 coordinator.rowDrag.translation = translation
                 let landing = Self.landingIndex(translation: translation, index: self?.row ?? 0,
                                                 count: coordinator.viewModel.table.rows.count,
                                                 sizes: coordinator.viewModel.rowHeights,
                                                 fallback: TableViewModel.defaultRowHeight)
-                let animated = coordinator.rowDrag.target != landing
                 coordinator.rowDrag.target = landing
-                documentView.applyRowDragFrames(animated: animated, coordinator: coordinator)
+                documentView.applyRowDragFrames(animated: false, coordinator: coordinator)
             },
             onEnded: { [weak self, weak coordinator, weak documentView] translation in
                 guard let self, let coordinator, let documentView else { return }
-                defer { coordinator.rowDrag.reset(); coordinator.appliedRowOffsets.removeAll(); documentView.sync() }
+                defer { coordinator.rowDrag.reset(); documentView.sync() }
                 guard let before = snapshot, translation != 0 else { return }
                 let dest = Self.landingIndex(translation: translation, index: self.row,
                                              count: coordinator.viewModel.table.rows.count,
@@ -949,15 +1150,13 @@ final class RowMoveHandleView: NSView {
                 let slack = min(max(geom.rowTop(source) + translation - gap, -WYSIWYGView.followSlack), WYSIWYGView.followSlack)
                 let visualTop = gap + slack
                 coordinator.viewModel.moveRow(from: source, to: dest, before: before)
-                // The commit relays rows instantly; pin the row at its visual
-                // position, then spring it to its new slot. The new slot's top
-                // must come from the post-move heights, so re-read geometry.
+                // The new slot's top must come from the post-move heights, so
+                // re-read geometry before pinning the row at its visual spot.
                 let moved = GridGeometry(viewModel: coordinator.viewModel)
                 coordinator.rowDrag.settleSlot = dest
                 coordinator.rowDrag.settleOffset = visualTop - moved.rowTop(dest)
-                coordinator.appliedRowOffsets.removeAll()
                 documentView.sync()
-                Self.settleRow(to: 0, coordinator: coordinator, documentView: documentView)
+                documentView.startSettle(vertical: true, coordinator: coordinator)
             })
         needsDisplay = true
     }
@@ -1041,20 +1240,18 @@ final class ColumnMoveHandleView: NSView {
                     coordinator.columnDrag.reset()
                     coordinator.columnDrag.dragged = self?.col
                     coordinator.columnDrag.target = self?.col
-                    coordinator.appliedColumnOffsets.removeAll()
                 }
                 coordinator.columnDrag.translation = translation
                 let landing = Self.landingIndex(translation: translation, index: self?.col ?? 0,
                                                 count: coordinator.viewModel.columnWidths.count,
                                                 sizes: coordinator.viewModel.columnWidths,
                                                 fallback: TableViewModel.defaultColumnWidth)
-                let animated = coordinator.columnDrag.target != landing
                 coordinator.columnDrag.target = landing
-                documentView.applyColumnDragFrames(animated: animated, coordinator: coordinator)
+                documentView.applyColumnDragFrames(animated: false, coordinator: coordinator)
             },
             onEnded: { [weak self, weak coordinator, weak documentView] translation in
                 guard let self, let coordinator, let documentView else { return }
-                defer { coordinator.columnDrag.reset(); coordinator.appliedColumnOffsets.removeAll(); documentView.sync() }
+                defer { coordinator.columnDrag.reset(); documentView.sync() }
                 guard let before = snapshot, translation != 0 else { return }
                 let dest = Self.landingIndex(translation: translation, index: self.col,
                                              count: coordinator.viewModel.columnWidths.count,
@@ -1069,9 +1266,8 @@ final class ColumnMoveHandleView: NSView {
                 let moved = GridGeometry(viewModel: coordinator.viewModel)
                 coordinator.columnDrag.settleSlot = dest
                 coordinator.columnDrag.settleOffset = visualLeft - moved.columnLeft(dest)
-                coordinator.appliedColumnOffsets.removeAll()
                 documentView.sync()
-                Self.settleColumn(to: 0, coordinator: coordinator, documentView: documentView)
+                documentView.startSettle(vertical: false, coordinator: coordinator)
             })
         needsDisplay = true
     }
@@ -1160,22 +1356,6 @@ extension RowMoveHandleView {
         let index = dy > 0 ? above - 1 : above
         return min(max(index, 0), count - 1)
     }
-
-    /// Springs the settling row's views to `offset` and clears the settle pin.
-    static func settleRow(to offset: CGFloat, coordinator: GridCoordinator, documentView: GridDocumentView) {
-        guard coordinator.rowDrag.settleSlot != nil else { return }
-        DispatchQueue.main.async {
-            coordinator.rowDrag.settleOffset = offset
-            coordinator.appliedRowOffsets.removeAll()
-            documentView.sync()
-            documentView.applyRowDragFrames(animated: true, coordinator: coordinator)
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                coordinator.rowDrag.settleSlot = nil
-                coordinator.rowDrag.settleOffset = 0
-                documentView.sync()
-            }
-        }
-    }
 }
 
 extension ColumnMoveHandleView {
@@ -1199,21 +1379,6 @@ extension ColumnMoveHandleView {
         }
         let index = dx > 0 ? leftOf - 1 : leftOf
         return min(max(index, 0), count - 1)
-    }
-
-    static func settleColumn(to offset: CGFloat, coordinator: GridCoordinator, documentView: GridDocumentView) {
-        guard coordinator.columnDrag.settleSlot != nil else { return }
-        DispatchQueue.main.async {
-            coordinator.columnDrag.settleOffset = offset
-            coordinator.appliedColumnOffsets.removeAll()
-            documentView.sync()
-            documentView.applyColumnDragFrames(animated: true, coordinator: coordinator)
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                coordinator.columnDrag.settleSlot = nil
-                coordinator.columnDrag.settleOffset = 0
-                documentView.sync()
-            }
-        }
     }
 }
 
@@ -1354,7 +1519,7 @@ struct GridGeometry {
         guard let sel = viewModel.cellSelection, !viewModel.table.rows.isEmpty else { return nil }
         var left = CGFloat.greatestFiniteMagnitude, right = -CGFloat.greatestFiniteMagnitude
         var top = CGFloat.greatestFiniteMagnitude, bottom = -CGFloat.greatestFiniteMagnitude
-        for (row, slots) in viewModel.table.placements().enumerated() {
+        for (row, slots) in viewModel.cachedPlacements.enumerated() {
             for p in slots where sel.intersects(row: row, rowSpan: p.rowSpan,
                                                 startCol: p.startCol, span: p.colSpan) {
                 left = min(left, columnEdge(p.startCol))

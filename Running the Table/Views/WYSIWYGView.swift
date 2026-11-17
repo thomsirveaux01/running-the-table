@@ -2,11 +2,11 @@ import AppKit
 import SwiftUI
 
 /// The WYSIWYG grid entry point. The layout itself lives in TableGridView
-/// (one AppKit document view with pooled cell editors); this wrapper keeps
-/// the SwiftUI entry point the editor and the probes construct, and lists the
-/// view-model properties whose changes must re-run the grid's sync. The
-/// geometry constants and coordinate math below are the contract the
-/// gridlayout/rowbound/handlepos probes pin.
+/// (one AppKit document view that draws every cell and parks a single shared
+/// editor on the focused cell); this wrapper keeps the SwiftUI entry point the
+/// editor and the probes construct, and lists the view-model properties whose
+/// changes must re-run the grid's sync. The geometry constants and coordinate
+/// math below are the contract the gridlayout/rowbound/handlepos probes pin.
 struct WYSIWYGView: View {
     var viewModel: TableViewModel
 

@@ -2,6 +2,19 @@ import AppKit
 import Observation
 import SwiftUI
 
+// TEMP RTSWITCH click→pixel tracer (Nov 17 hitch diagnosis; remove after use).
+// Same clock as NSEvent.timestamp (seconds since boot), so ages are directly
+// comparable across every stage.
+enum RTSwitchTrace {
+    static var gen = 0
+    static var lastBeat: Double = 0
+    static var requestCount = 0
+    static var now: Double { ProcessInfo.processInfo.systemUptime * 1000 }
+    static func log(_ msg: String) {
+        NSLog("RTSWITCH gen=\(gen) t=\(String(format: "%.1f", now)) \(msg)")
+    }
+}
+
 struct GridCell: Hashable {
     var row: Int
     var column: Int
@@ -110,6 +123,52 @@ final class TableViewModel {
     static let defaultRowHeight: CGFloat = 32
     static let minColumnWidth: CGFloat = 40
     static let minRowHeight: CGFloat = 24
+
+    // Layout-scan cache: every move handle asks "can I travel?" on every
+    // update, and each question used to re-run the full gridScan. Keying the
+    // scan and the gates on the span geometry makes the reads O(1) between
+    // structure changes.
+    @ObservationIgnored private var placementsFingerprint = -1
+    @ObservationIgnored private var placementsSlots: [[Table.CellPlacement]] = []
+    @ObservationIgnored private var canMoveRowCache: [Int: Bool] = [:]
+    @ObservationIgnored private var canMoveColumnCache: [Int: Bool] = [:]
+
+    var cachedPlacements: [[Table.CellPlacement]] {
+        let fp = table.structureFingerprint
+        if fp != placementsFingerprint {
+            placementsFingerprint = fp
+            placementsSlots = table.placements()
+            canMoveRowCache.removeAll()
+            canMoveColumnCache.removeAll()
+        }
+        return placementsSlots
+    }
+
+    /// Cached twin of Table.rowspanCrosses for the single-row gate the
+    /// travel/remove/duplicate checks all share.
+    private func rowTravelable(_ row: Int) -> Bool {
+        if let hit = canMoveRowCache[row] { return hit }
+        let ok = table.rows.indices.contains(row) && !cachedRowspanCrosses(row)
+        canMoveRowCache[row] = ok
+        return ok
+    }
+
+    private func cachedRowspanCrosses(_ row: Int) -> Bool {
+        cachedPlacements.enumerated().contains { origin, slots in
+            slots.contains { $0.rowSpan > 1 && origin <= row && origin + $0.rowSpan - 1 >= row }
+        }
+    }
+
+    /// Cached twin of Table.columnHasMerge.
+    private func cachedColumnHasMerge(_ col: Int) -> Bool {
+        if let hit = canMoveColumnCache[col] { return !hit }
+        let merged = cachedPlacements.contains { slots in
+            slots.contains { $0.startCol <= col && col < $0.startCol + $0.colSpan
+                && ($0.colSpan > 1 || $0.rowSpan > 1) }
+        }
+        canMoveColumnCache[col] = !merged
+        return merged
+    }
 
     init() {
         // One-time title-store migration. With a stored grant the library
@@ -558,7 +617,7 @@ final class TableViewModel {
     private func placement(of cell: GridCell) -> Table.CellPlacement? {
         guard table.rows.indices.contains(cell.row),
               table.rows[cell.row].cells.indices.contains(cell.column) else { return nil }
-        return table.placements()[cell.row].first { $0.cellIndex == cell.column }
+        return cachedPlacements[cell.row].first { $0.cellIndex == cell.column }
     }
 
     func removeRow() {
@@ -577,7 +636,7 @@ final class TableViewModel {
     /// Deleting a row a merge touches would tear the merge; those rows stay
     /// undeletable until the merge is split.
     func canRemoveRow(_ row: Int) -> Bool {
-        table.rows.indices.contains(row) && !table.rowspanCrosses(rows: row, row)
+        rowTravelable(row)
     }
 
     func removeColumn() {
@@ -606,7 +665,7 @@ final class TableViewModel {
     /// cells around it; those columns stay un-deletable until split.
     var canRemoveFocusedColumn: Bool {
         guard let f = focusedCell, table.columnCount > 1, let p = placement(of: f) else { return false }
-        return !table.columnHasMerge(p.startCol)
+        return !cachedColumnHasMerge(p.startCol)
     }
 
     // MARK: - Duplicate row/column
@@ -615,7 +674,7 @@ final class TableViewModel {
     /// merge's covered rows, so those rows stay unduplicable until split (the
     /// same gate as removeRow).
     func canDuplicateRow(_ row: Int) -> Bool {
-        table.rows.indices.contains(row) && !table.rowspanCrosses(rows: row, row)
+        rowTravelable(row)
     }
 
     var canDuplicateFocusedRow: Bool {
@@ -654,7 +713,7 @@ final class TableViewModel {
     /// same gate as removeColumn).
     func canDuplicateColumn(_ col: Int) -> Bool {
         guard col >= 0, col < table.columnCount else { return false }
-        return !table.columnHasMerge(col)
+        return !cachedColumnHasMerge(col)
     }
 
     var canDuplicateFocusedColumn: Bool {
@@ -696,7 +755,7 @@ final class TableViewModel {
     /// Rows a merge touches can't travel alone (the covered rows or the
     /// merge's lower half would be left behind), so their handles sit idle.
     func canMoveRow(_ row: Int) -> Bool {
-        table.rows.indices.contains(row) && !table.rowspanCrosses(rows: row, row)
+        rowTravelable(row)
     }
 
     // Height and focus travel with the row; the drag-start snapshot is the
@@ -705,7 +764,7 @@ final class TableViewModel {
         let count = table.rows.count
         let dest = min(max(destination, 0), count - 1)
         guard table.rows.indices.contains(source), dest != source,
-              !table.rowspanCrosses(rows: source, source),
+              rowTravelable(source),
               !table.rowspanSplitsBand(min(source, dest), max(source, dest)) else { return }
         let toOffset = dest > source ? dest + 1 : dest
         table.rows.move(fromOffsets: IndexSet(integer: source), toOffset: toOffset)
@@ -739,7 +798,8 @@ final class TableViewModel {
     // spans several rows of alignment, so merge-touched columns stay
     // un-grabbable.
     func canMoveColumn(_ col: Int) -> Bool {
-        !table.columnHasMerge(col)
+        guard col >= 0, col < table.columnCount else { return false }
+        return !cachedColumnHasMerge(col)
     }
 
     // Width and focus travel with the column; cells are matched by grid
@@ -1306,8 +1366,19 @@ final class TableViewModel {
     /// click pays no delay; later requests within the 20 ms window collapse
     /// into one trailing apply, so a rapid burst still pays one load per
     /// burst instead of one per click.
-    func requestSidebarSelection(_ new: Set<UUID>) {
+    /// What the sidebar List's binding must read back: the in-flight request
+    /// while the coalescer window is open, the committed selection otherwise.
+    /// Reading plain sidebarSelection let List see the pre-click value for a
+    /// beat after every click; the snap-back reconciliation ate rapid clicks.
+    var listSelectionSnapshot: Set<UUID> {
+        let committed = sidebarSelection  // read unconditionally to keep Observation tracking it
+        return pendingSidebarSelection ?? committed
+    }
+
+    func requestSidebarSelection(_ new: Set<UUID>, src: String = "list") {
         let leading = sidebarCoalesceTimer == nil
+        RTSwitchTrace.requestCount += 1  // TEMP
+        RTSwitchTrace.log("request src=\(src) leading=\(leading ? 1 : 0)")  // TEMP
         pendingSidebarSelection = new
         if leading {
             Task { @MainActor [weak self] in
@@ -1333,6 +1404,9 @@ final class TableViewModel {
     /// The sidebar list's selection: plain click replaces, ⌘-click toggles.
     /// The editor follows the last-clicked table; clearing keeps the open one.
     func applySidebarSelection(_ new: Set<UUID>) {
+        RTSwitchTrace.gen += 1  // TEMP
+        let tApply = RTSwitchTrace.now  // TEMP
+        RTSwitchTrace.log("apply")  // TEMP
         let old = sidebarSelection
         guard new != old else { return }
         sidebarSelection = new
@@ -1346,6 +1420,7 @@ final class TableViewModel {
             primary = new.isEmpty ? nil : documents.first { new.contains($0.id) }?.id
         }
         if let primary, primary != selectedDocumentID { selectDocument(primary) }
+        RTSwitchTrace.log("selectDone dt=\(String(format: "%.1f", RTSwitchTrace.now - tApply))ms")  // TEMP
     }
 
     /// Inline sidebar rename: keystrokes update the in-memory name only; the
@@ -1855,6 +1930,8 @@ final class TableViewModel {
     // The filename always mirrors the name: the first save derives it, and a
     // rename (inline or dialog) has already moved the file to the new stem.
     func saveAllDocuments() {
+        let tSave = RTSwitchTrace.now  // TEMP
+        var rtWrites = 0  // TEMP
         autosaveTimer?.invalidate()
         autosaveTimer = nil
         let fm = FileManager.default
@@ -1873,11 +1950,13 @@ final class TableViewModel {
                 continue
             }
             savedHTML[documents[idx].id] = html
+            rtWrites += 1  // TEMP
             documents[idx].fileURL = url
             if let mtime = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate {
                 modifiedDates[documents[idx].id] = mtime
             }
         }
+        RTSwitchTrace.log("save dt=\(String(format: "%.1f", RTSwitchTrace.now - tSave))ms writes=\(rtWrites)")  // TEMP
     }
 
     private static func uniqueFileURL(for name: String, taken: inout Set<String>) -> URL {

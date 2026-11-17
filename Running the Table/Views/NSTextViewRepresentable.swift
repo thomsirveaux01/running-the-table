@@ -70,14 +70,11 @@ final class CellTextView: NSTextView, NSMenuDelegate {
     var keyCommandHandler: ((NSEvent) -> Bool)?
     weak var undoManagerOverride: UndoManager?
     var highlightsCurrentLine = false
-    /// Set only in the pooled grid: the model cell this view currently
-    /// represents (handlers read it at fire time, so a view reused across a
-    /// table switch keeps reporting the right cell) and the focus/separator
-    /// border the old CellView's strokeBorder overlay drew.
+    /// Set only in the grid: the model cell the shared editor currently
+    /// represents (handlers read it at fire time, so a re-point across a
+    /// table switch keeps reporting the right cell).
     var modelCell: GridCell?
     var modelStartCol = 0
-    var gridBorderColor: NSColor?
-    var gridBorderWidth: CGFloat = 1
     /// Drag-selection state, set only in the grid: this slot's visual
     /// rectangle, the grid's point→cell hit-test, and the selection sink.
     var gridVisualOrigin: VisualCell?
@@ -261,18 +258,6 @@ final class CellTextView: NSTextView, NSMenuDelegate {
         return accepted
     }
 
-    // The grid draws each cell's focus/separator border (the old CellView
-    // strokeBorder overlay) on top of the text's own drawing.
-    override func draw(_ dirtyRect: NSRect) {
-        super.draw(dirtyRect)
-        guard let color = gridBorderColor else { return }
-        color.setStroke()
-        let half = gridBorderWidth / 2
-        let path = NSBezierPath(rect: bounds.insetBy(dx: half, dy: half))
-        path.lineWidth = gridBorderWidth
-        path.stroke()
-    }
-
     // IDE-style band behind the caret's line.
     override func drawBackground(in rect: NSRect) {
         super.drawBackground(in: rect)
@@ -443,13 +428,6 @@ struct NSTextViewRepresentable: NSViewRepresentable {
     var cellCommands: ((CellCommand) -> Void)? = nil
     /// Greys out a context-menu command the cell can't run; nil = all enabled.
     var cellCommandValidator: ((CellCommand) -> Bool)? = nil
-    /// Drag-selection support, set only on grid cells: this slot's visual
-    /// rectangle, and the grid's point→cell hit-test and selection sink.
-    var gridVisualOrigin: VisualCell?
-    var gridVisualSpan = 1
-    var gridVisualRowSpan = 1
-    var visualCellAt: ((NSPoint) -> VisualCell?)?
-    var cellRangeHandler: ((VisualCellRange?) -> Void)?
     /// With a cell range selected, ⌘C copies the cells; true = handled.
     var copyCells: (() -> Bool)?
     /// ⌘V with a table on the pasteboard makes a new table; true = handled.
@@ -555,7 +533,9 @@ struct NSTextViewRepresentable: NSViewRepresentable {
         wire(textView: textView, coordinator: context.coordinator)
         // @Observable re-fires this on every model change, so the pane
         // applies directly; apply() skips the write when the text is equal.
+        let tPane = RTSwitchTrace.now  // TEMP
         context.coordinator.apply(content: content, to: textView)
+        RTSwitchTrace.log("pane apply dt=\(String(format: "%.1f", RTSwitchTrace.now - tPane))ms syn=\(highlightsSyntax ? 1 : 0)")  // TEMP
         context.coordinator.applyAlignmentIfNeeded(to: textView)
 
         // Focus bridge: follow false→true grid moves only when the keyboard
@@ -579,7 +559,7 @@ struct NSTextViewRepresentable: NSViewRepresentable {
         if !textView.backgroundColor.isEqual(Self.background(isHeader: isHeader)) {
             textView.backgroundColor = Self.background(isHeader: isHeader)
         }
-        context.coordinator.refreshDecorations(textView)
+        context.coordinator.scheduleDecorations(textView)
     }
 
     private func wire(textView: CellTextView, coordinator: Coordinator) {
@@ -608,11 +588,6 @@ struct NSTextViewRepresentable: NSViewRepresentable {
                 coordinator?.parent.cellCommandValidator?(command) ?? true
             }
         }
-        textView.gridVisualOrigin = gridVisualOrigin
-        textView.gridVisualSpan = gridVisualSpan
-        textView.gridVisualRowSpan = gridVisualRowSpan
-        textView.visualCellAt = visualCellAt
-        textView.cellRangeHandler = cellRangeHandler
         textView.copyCellsHandler = copyCells
         textView.pasteTableHandler = pasteTable
         textView.colspanCurrent = colspanCurrent
@@ -632,18 +607,22 @@ struct NSTextViewRepresentable: NSViewRepresentable {
         // AppKit echoes programmatic text/selection swaps back as delegate
         // callbacks; publishing those would mutate the model mid-view-update.
         var applyingProgrammaticContent = false
+        // Decoration (syntax runs + ruler) is purely visual: SwiftUI re-fires
+        // updateNSView several times per switch, and each synchronous pass
+        // blocked the click turn. One coalesced pass on the next turn instead.
+        private var decorationsScheduled = false
 
         init(parent: NSTextViewRepresentable) {
             self.parent = parent
         }
 
         func apply(content: NSAttributedString, to textView: CellTextView) {
-            // The storage carries the view-layer paragraph style but the model's
-            // content is style-free, so compare with the style stripped to avoid
-            // a swap (and IME-interrupting reset) on every revision bump.
+            // Plain-string equality is a sufficient skip: the model's content
+            // is style-free and the view layer only ever adds paragraph style,
+            // which the alignment pass re-applies on its own. The previous
+            // attributed copy-and-compare cost a full storage copy per pass.
             let current = textView.textStorage ?? NSAttributedString()
-            if Self.strippingParagraphStyle(current).isEqual(to: content) {
-                // Text unchanged; the alignment may still have changed.
+            if current.length == content.length, current.string == content.string {
                 applyAlignmentIfNeeded(to: textView)
                 return
             }
@@ -746,6 +725,8 @@ struct NSTextViewRepresentable: NSViewRepresentable {
         // reach the text storage, so the model, undo, and equality-skip sync
         // stay untouched.
         func refreshDecorations(_ textView: NSTextView) {
+            let tDec = RTSwitchTrace.now  // TEMP
+            defer { RTSwitchTrace.log("decor dt=\(String(format: "%.1f", RTSwitchTrace.now - tDec))ms syntax=\(parent.highlightsSyntax ? 1 : 0)") }  // TEMP
             if parent.highlightsSyntax, let layoutManager = textView.layoutManager {
                 let ns = textView.string as NSString
                 let full = NSRange(location: 0, length: ns.length)
@@ -766,6 +747,18 @@ struct NSTextViewRepresentable: NSViewRepresentable {
             }
             textView.enclosingScrollView?.verticalRulerView?.needsDisplay = true
             if parent.highlightsSyntax || parent.highlightsCurrentLine { textView.needsDisplay = true }
+        }
+
+        /// Next-turn, coalesced variant of refreshDecorations for the
+        /// SwiftUI update path (see decorationsScheduled).
+        func scheduleDecorations(_ textView: NSTextView) {
+            guard !decorationsScheduled else { return }
+            decorationsScheduled = true
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.decorationsScheduled = false
+                self.refreshDecorations(textView)
+            }
         }
     }
 }

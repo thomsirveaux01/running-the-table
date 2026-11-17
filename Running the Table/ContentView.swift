@@ -245,7 +245,7 @@ struct SidebarView: View {
 
     var body: some View {
         List(selection: Binding(
-            get: { viewModel.sidebarSelection },
+            get: { viewModel.listSelectionSnapshot },
             set: { newValue in
                 // SwiftUI hands the List's selection change to this setter during
                 // its own view-update pass; applySidebarSelection loads a document,
@@ -388,6 +388,15 @@ struct SidebarRow: View {
                 .foregroundStyle(.secondary)
         }
         .padding(.vertical, 2)
+        // Click-to-open fast path. List's selection binding swallows roughly
+        // one in two rapid clicks while reconciling the previous switch; the
+        // tap delivers regardless, and List's own set (or a late echo) then
+        // dedupes in applySidebarSelection. ⌘-click stays on the List path
+        // for multi-select.
+        .simultaneousGesture(TapGesture().onEnded {
+            guard !NSEvent.modifierFlags.contains(.command) else { return }
+            viewModel.requestSidebarSelection([documentID], src: "tap")
+        })
         .onChange(of: isEditing) { _, editing in
             if editing {
                 nameFieldFocused = true

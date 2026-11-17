@@ -97,6 +97,20 @@ struct Table {
     /// Each row's own cells with their visual footprints, in array order.
     func placements() -> [[CellPlacement]] { gridScan().slots }
 
+    /// Content-independent layout key: equal fingerprints imply equal
+    /// placements(), which is what lets the view model cache the scan and the
+    /// move-gate answers instead of re-running a full gridScan per query.
+    var structureFingerprint: Int {
+        var hash = rows.count &* 31 &+ columnCount
+        for row in rows {
+            hash = hash &* 31 &+ row.cells.count
+            for cell in row.cells {
+                hash = hash &* 31 &+ Self.clampedSpan(cell.colspan) &* 3 &+ Self.clampedRowSpan(cell.rowspan)
+            }
+        }
+        return hash
+    }
+
     /// The cell visually covering grid position (row, col), which may
     /// originate in a row above via rowspan.
     func cellCovering(row: Int, col: Int) -> (row: Int, cell: Int)? {
