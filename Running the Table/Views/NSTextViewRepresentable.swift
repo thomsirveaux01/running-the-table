@@ -513,7 +513,6 @@ struct NSTextViewRepresentable: NSViewRepresentable {
         if !textView.backgroundColor.isEqual(Self.background(isHeader: isHeader)) {
             textView.backgroundColor = Self.background(isHeader: isHeader)
         }
-        context.coordinator.scheduleDecorations(textView)
     }
 
     private func wire(textView: CellTextView, coordinator: Coordinator) {
@@ -558,9 +557,6 @@ struct NSTextViewRepresentable: NSViewRepresentable {
         // AppKit echoes programmatic text/selection swaps back as delegate
         // callbacks; publishing those would mutate the model mid-view-update.
         var applyingProgrammaticContent = false
-        // Decoration is purely visual; SwiftUI re-fires updateNSView several
-        // times per switch, so refreshes coalesce to one pass on the next turn.
-        private var decorationsScheduled = false
 
         init(parent: NSTextViewRepresentable) {
             self.parent = parent
@@ -591,6 +587,11 @@ struct NSTextViewRepresentable: NSViewRepresentable {
                 lastAppliedAlignment = .left
             } else {
                 applyAlignment(to: textView)
+            }
+            // The swap wiped the layout manager's temporary syntax colors;
+            // re-apply now, not next turn, or the pane flashes uncolored.
+            if parent.highlightsSyntax {
+                refreshDecorations(textView)
             }
         }
 
@@ -684,16 +685,6 @@ struct NSTextViewRepresentable: NSViewRepresentable {
             }
             textView.enclosingScrollView?.verticalRulerView?.needsDisplay = true
             if parent.highlightsSyntax || parent.highlightsCurrentLine { textView.needsDisplay = true }
-        }
-
-        func scheduleDecorations(_ textView: NSTextView) {
-            guard !decorationsScheduled else { return }
-            decorationsScheduled = true
-            DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
-                self.decorationsScheduled = false
-                self.refreshDecorations(textView)
-            }
         }
     }
 }
