@@ -88,6 +88,9 @@ final class TableViewModel {
     var showMarkdownExportPrompt = false
     var markdownExportLosses: [String] = []
     var markdownExportBlocked = false
+    // The save panel waits for the loss sheet's onDismiss: attaching beginSheetModal
+    // mid-dismissal gets the panel killed before the user can touch it.
+    private var pendingMarkdownSave = false
     /// The filename the rename sheet displays, derived live from the title.
     var renameFileNameDisplay: String {
         Self.sanitizedFileName(renameTitleText.trimmingCharacters(in: .whitespacesAndNewlines))
@@ -2179,7 +2182,15 @@ final class TableViewModel {
 
     func confirmMarkdownExport() {
         showMarkdownExportPrompt = false
-        presentMarkdownSavePanel()
+        pendingMarkdownSave = true
+    }
+
+    /// The prompt sheet's onDismiss hook: the save panel only attaches once the sheet is gone.
+    func markdownPromptDismissed() {
+        guard pendingMarkdownSave else { return }
+        pendingMarkdownSave = false
+        // One turn after onDismiss — SwiftUI's sheet teardown can still be in flight.
+        DispatchQueue.main.async { [weak self] in self?.presentMarkdownSavePanel() }
     }
 
     func cancelMarkdownExport() {

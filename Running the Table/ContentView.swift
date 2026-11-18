@@ -52,7 +52,7 @@ struct ContentView: View {
         .sheet(isPresented: $viewModel.showRenamePrompt) {
             RenameTablePrompt(viewModel: viewModel)
         }
-        .sheet(isPresented: $viewModel.showMarkdownExportPrompt) {
+        .sheet(isPresented: $viewModel.showMarkdownExportPrompt, onDismiss: viewModel.markdownPromptDismissed) {
             MarkdownExportPrompt(viewModel: viewModel)
         }
         .sheet(isPresented: $viewModel.showTableAttributes) {

@@ -17,14 +17,18 @@ import SwiftUI
         // 150 ms (List ate it mid-reconcile), route the clicked table row's document directly.
         let vm = viewModel
         NSEvent.addLocalMonitorForEvents(matching: .leftMouseUp) { e in
+            // Rescue main-window clicks only, and never while a sheet is up: the
+            // save/open panels' file browsers are NSTableViews too, and menu
+            // tracking delivers stray windows whose coords land on sidebar rows.
             if e.clickCount == 1,
-               e.modifierFlags.isDisjoint(with: [.command, .shift, .option]) {
-                let win = e.window
+               e.modifierFlags.isDisjoint(with: [.command, .shift, .option]),
+               let win = e.window, win === (NSApp.keyWindow ?? NSApp.mainWindow),
+               win.attachedSheet == nil {
                 let pt = e.locationInWindow
                 let seen = SidebarClickGuard.requestCount
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
                     guard SidebarClickGuard.requestCount == seen,
-                          let content = win?.contentView,
+                          let content = win.contentView,
                           let hit = content.hitTest(content.convert(pt, from: nil)) else { return }
                     var v: NSView? = hit
                     while let cur = v, !(cur is NSTableRowView) { v = cur.superview }
