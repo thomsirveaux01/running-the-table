@@ -187,6 +187,9 @@ final class GridCoordinator: NSObject, NSTextViewDelegate, NSTextFieldDelegate {
         let viewModel = self.viewModel
         DispatchQueue.main.async {
             viewModel.updateCellSelection(row: cell.row, col: cell.column, NSRange(location: loc, length: 0))
+            // The editor losing first responder for any reason (a click outside
+            // the grid) ends the edit; never leave a stale caret mode behind.
+            viewModel.cellMode = .selected
         }
     }
 }
@@ -245,6 +248,45 @@ final class GridDocumentView: NSView {
 
     // First clicks in an inactive window must act on the grid, not merely activate the window.
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    /// In select mode the grid itself owns the keys (there is no caret), so it
+    /// must be able to take first responder; the editor takes over in edit mode.
+    override var acceptsFirstResponder: Bool { true }
+
+    override func keyDown(with event: NSEvent) {
+        guard let coordinator, let cell = coordinator.viewModel.focusedCell,
+              let action = coordinator.viewModel.handleGridKey(event, from: cell) else {
+            super.keyDown(with: event)
+            return
+        }
+        executeGridKeyAction(action)
+    }
+
+    /// Finishes a grid keystroke the view model decided: the first-responder
+    /// switch and any caret or insert the model can't reach.
+    func executeGridKeyAction(_ action: GridKeyAction) {
+        switch action {
+        case .moved:
+            // Selection moved; park on the grid so the caret follows the mode.
+            window?.makeFirstResponder(self)
+        case .beginEditing(let insert):
+            window?.makeFirstResponder(editor)
+            if let insert {
+                // Typing replaces the whole content; the caret lands after it.
+                editor.insertText(insert,
+                                  replacementRange: NSRange(location: 0, length: editor.string.count))
+            } else {
+                // F2: begin editing with the caret at the end of the content.
+                editor.setSelectedRange(NSRange(location: editor.string.count, length: 0))
+            }
+        case .clearCell, .clearRange:
+            // Content already changed in the model; sync() repaints, and the
+            // first responder is already correct for the current mode.
+            break
+        case .endEditing, .clearFocus:
+            window?.makeFirstResponder(self)
+        }
+    }
 
     private var geometry: GridGeometry? {
         guard let coordinator else { return nil }
@@ -487,10 +529,12 @@ final class GridDocumentView: NSView {
         if editorClip.frame != rect { editorClip.frame = rect }
         editorClip.isHidden = false
         let model = viewModel.cell(row: focused.row, col: focused.column)
+        // Park a caret only while editing; in select mode the editor shows the
+        // text but a caret would flash on the next first-responder switch.
         coordinator.apply(content: model?.content ?? NSAttributedString(),
                           revision: viewModel.contentRevision,
                           to: editor, alignment: model?.alignment ?? .left,
-                          caret: cellChanged
+                          caret: cellChanged && viewModel.cellMode == .editing
                               ? NSRange(location: (model?.content.length ?? 0), length: 0) : nil)
     }
 
@@ -508,13 +552,18 @@ final class GridDocumentView: NSView {
         editor.didBecomeFirstResponderHandler = { [weak editor, weak viewModel] in
             guard let cell = editor?.modelCell else { return }
             viewModel?.focusedCell = cell
+            // The editor only becomes first responder to edit, so ownership of
+            // the keys (and the caret) transfers with it.
+            viewModel?.cellMode = .editing
         }
         editor.flushPendingEditsHandler = { [weak viewModel] in
             viewModel?.closeTypingGroup()
         }
-        editor.keyCommandHandler = { [weak editor, weak viewModel] event in
-            guard let cell = editor?.modelCell else { return false }
-            return viewModel?.handleGridKey(event, from: cell) ?? false
+        editor.keyCommandHandler = { [weak self, weak editor, weak viewModel] event in
+            guard let cell = editor?.modelCell,
+                  let action = viewModel?.handleGridKey(event, from: cell) else { return false }
+            self?.executeGridKeyAction(action)
+            return true
         }
         editor.cellCommandHandler = { [weak editor, weak viewModel] command in
             guard let cell = editor?.modelCell else { return }
@@ -596,21 +645,52 @@ final class GridDocumentView: NSView {
 
     // MARK: - Mouse
 
-    /// Clicks reach the document view only outside the editor: focus the hit cell, park the
-    /// editor there, then hand it the click so the caret lands where the user clicked.
+    /// The origin slot of a press-drag started on the document view (a click
+    /// on the focused cell goes to the parked editor instead).
+    private struct DragOrigin {
+        var row: Int
+        var startCol: Int
+        var colSpan: Int
+        var rowSpan: Int
+    }
+    private var dragOrigin: DragOrigin?
+
+    /// Clicks reach the document view only outside the parked editor: select the hit
+    /// cell with no caret. The caret appears when the user clicks the already-focused
+    /// cell again, which the editor receives and turns into an edit.
     override func mouseDown(with event: NSEvent) {
         guard let coordinator, let geom = geometry else { return }
         let point = convert(event.locationInWindow, from: nil)
         guard let (row, placement) = cellRow(at: point, geom: geom, coordinator: coordinator) else { return }
-        let target = GridCell(row: row, column: placement.cellIndex)
-        if coordinator.viewModel.focusedCell != target {
-            coordinator.viewModel.focusedCell = target
-        }
+        let viewModel = coordinator.viewModel
+        viewModel.focusedCell = GridCell(row: row, column: placement.cellIndex)
+        viewModel.cellSelection = nil
+        viewModel.cellMode = .selected
+        viewModel.resetNavigation()
+        dragOrigin = DragOrigin(row: row, startCol: placement.startCol,
+                                colSpan: placement.colSpan, rowSpan: placement.rowSpan)
         placeEditor(geom: geom, coordinator: coordinator)
-        window?.makeFirstResponder(editor)
-        // Event locations are window-based; the editor converts from the
-        // window itself, so the hit-test point needs no re-basing.
-        editor.mouseDown(with: event)
+        window?.makeFirstResponder(self)
+    }
+
+    /// A press-drag from any cell grows a range selection, mirroring the editor's
+    /// own drag so formatting's whole-cell targets work from a fresh click.
+    override func mouseDragged(with event: NSEvent) {
+        guard let coordinator, let geom = geometry, let origin = dragOrigin else { return }
+        let point = convert(event.locationInWindow, from: nil)
+        guard let hit = WYSIWYGView.visualCell(at: point,
+                                               columnWidths: coordinator.viewModel.columnWidths,
+                                               rowHeights: coordinator.viewModel.rowHeights,
+                                               captionOffset: geom.captionBandHeight) else { return }
+        coordinator.viewModel.cellSelection = VisualCellRange(
+            rowStart: min(origin.row, hit.row),
+            rowEnd: max(origin.row + origin.rowSpan - 1, hit.row),
+            colStart: min(origin.startCol, hit.column),
+            colEnd: max(origin.startCol + origin.colSpan - 1, hit.column))
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        dragOrigin = nil
     }
 
     /// Right-click must offer the clicked cell's menu even when focus sits elsewhere: re-point

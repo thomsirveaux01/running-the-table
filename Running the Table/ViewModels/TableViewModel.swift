@@ -41,6 +41,47 @@ struct EditorSnapshot {
     let focusedCell: GridCell?
 }
 
+/// What a grid keystroke did, so the view can finish the parts the view model
+/// can't reach: first-responder switches and caret placement.
+enum GridKeyAction {
+    /// Focus moved to another cell; the parked editor follows via sync().
+    case moved
+    /// Enter edit mode; a non-nil string replaces the cell's content (typing).
+    case beginEditing(insert: String?)
+    /// A single selected cell's content was cleared.
+    case clearCell
+    /// A drag-selected range was cleared.
+    case clearRange
+    /// Editing ended (Escape); the cell keeps its content and stays focused.
+    case endEditing
+    /// The selection was cleared (Escape with nothing being edited).
+    case clearFocus
+}
+
+/// The learned rectangle Tab/Enter wrap inside. It starts at the first focused
+/// cell and grows as the user navigates, so a two-column working area wraps at
+/// its own edges rather than the table's.
+struct WorkRange {
+    var top: Int
+    var bottom: Int
+    var left: Int
+    var right: Int
+
+    init(_ cell: GridCell) {
+        top = cell.row
+        bottom = cell.row
+        left = cell.column
+        right = cell.column
+    }
+
+    mutating func grow(to cell: GridCell) {
+        top = min(top, cell.row)
+        bottom = max(bottom, cell.row)
+        left = min(left, cell.column)
+        right = max(right, cell.column)
+    }
+}
+
 @MainActor
 @Observable
 final class TableViewModel {
@@ -70,6 +111,17 @@ final class TableViewModel {
     @ObservationIgnored
     var selectionRange = NSRange(location: 0, length: 0)
     var cellSelection: VisualCellRange?
+    /// Selected = the cell is highlighted with no caret; editing = the caret is live.
+    /// Observed: placeEditor reads it to decide whether to park a caret.
+    var cellMode: CellMode = .selected
+    /// The learned Tab/Enter wrap rectangle; nil until the first navigation.
+    @ObservationIgnored var workRange: WorkRange?
+    /// The column a Tab series started from; Enter returns here, one row down.
+    @ObservationIgnored var tabOriginCol: Int?
+
+    /// The two keyboard states of a focused cell, mirroring Excel/Numbers.
+    enum CellMode { case selected, editing }
+
     var columnWidths: [CGFloat] = []
     var rowHeights: [CGFloat] = []
     var showLinkPrompt = false
@@ -328,6 +380,8 @@ final class TableViewModel {
         ensureSizing()
         focusedCell = snapshot.focusedCell
         keepFocusValid()
+        cellMode = .selected
+        resetNavigation()
         flushToDocument()
         regenerateHTML()
         contentRevision += 1
@@ -411,70 +465,164 @@ final class TableViewModel {
         }
     }
 
-    // Hardware keycodes: Tab/Return/Escape arrive as keyDown before the text
-    // system can turn them into inserted characters.
+    // Hardware keycodes: Tab/Return/Escape/Delete arrive as keyDown before the
+    // text system can turn them into inserted characters; the arrows move the
+    // caret in edit mode and the cell in select mode.
     private static let tabKeyCode: UInt16 = 48
     private static let returnKeyCode: UInt16 = 36
     private static let keypadReturnKeyCode: UInt16 = 76
     private static let escapeKeyCode: UInt16 = 53
     private static let deleteKeyCode: UInt16 = 51
+    private static let leftArrowKeyCode: UInt16 = 123
+    private static let rightArrowKeyCode: UInt16 = 124
+    private static let downArrowKeyCode: UInt16 = 125
+    private static let upArrowKeyCode: UInt16 = 126
+    private static let f2KeyCode: UInt16 = 100
 
-    // Unmodified Tab walks the grid, Return walks down a column, Escape
-    // commits; everything else (Cmd+C, typing) passes through.
-    func handleGridKey(_ event: NSEvent, from cell: GridCell) -> Bool {
+    /// Handles one grid keystroke. Returns nil when the key is not a grid
+    /// command (the caller hands it to the text system); otherwise the action
+    /// the view must finish — a first-responder switch, a caret, or an insert.
+    func handleGridKey(_ event: NSEvent, from cell: GridCell) -> GridKeyAction? {
         guard event.modifierFlags.intersection([.command, .control, .option]).isEmpty else {
-            return false
+            return nil
         }
         let shift = event.modifierFlags.contains(.shift)
         switch event.keyCode {
+        case Self.leftArrowKeyCode, Self.rightArrowKeyCode,
+             Self.downArrowKeyCode, Self.upArrowKeyCode:
+            // Arrows move the caret while editing; they move the cell only in
+            // select mode — that is what makes them feel like a spreadsheet.
+            guard cellMode == .selected else { return nil }
+            let dx = event.keyCode == Self.rightArrowKeyCode ? 1
+                     : event.keyCode == Self.leftArrowKeyCode ? -1 : 0
+            let dy = event.keyCode == Self.downArrowKeyCode ? 1
+                     : event.keyCode == Self.upArrowKeyCode ? -1 : 0
+            tabOriginCol = nil  // an arrow breaks any Tab series
+            moveFocus(from: cell, dx: dx, dy: dy)
+            return .moved
         case Self.tabKeyCode:
-            moveFocus(from: cell, horizontal: shift ? -1 : 1)
-            return true
+            if cellMode == .editing { closeTypingGroup() }
+            moveFocus(from: cell, tab: shift ? -1 : 1)
+            cellMode = .selected
+            return .moved
         case Self.returnKeyCode, Self.keypadReturnKeyCode:
-            moveFocus(from: cell, vertical: shift ? -1 : 1)
-            return true
+            if cellMode == .editing { closeTypingGroup() }
+            moveFocus(from: cell, enter: shift ? -1 : 1)
+            cellMode = .selected
+            return .moved
+        case Self.f2KeyCode:
+            // F2 begins editing the selected cell with the caret at the end.
+            guard cellMode == .selected else { return nil }
+            cellMode = .editing
+            return .beginEditing(insert: nil)
         case Self.escapeKeyCode:
-            closeTypingGroup()
+            if cellMode == .editing {
+                closeTypingGroup()
+                cellMode = .selected
+                return .endEditing
+            }
             cellSelection = nil
-            NSApp.keyWindow?.makeFirstResponder(nil)
-            return true
+            focusedCell = nil
+            return .clearFocus
         case Self.deleteKeyCode:
-            return clearSelectedCells()
+            if cellMode == .selected {
+                if cellSelection != nil {
+                    _ = clearSelectedCells()
+                    return .clearRange
+                }
+                clearSingleCellContent(cell)
+                return .clearCell
+            }
+            // Editing: a range clears the block; a lone cell is a normal
+            // backspace, so hand it to the text system.
+            return clearSelectedCells() ? .clearRange : nil
         default:
-            return false
+            // Typing on a selected cell replaces its content and begins editing.
+            guard cellMode == .selected, let typed = typedString(from: event) else { return nil }
+            cellMode = .editing
+            return .beginEditing(insert: typed)
         }
     }
 
-    // Tab wraps past the row end into the next row (Shift reverses); Return
-    // stays in the column, clamped at the grid edges.
-    func moveFocus(from cell: GridCell, horizontal: Int = 0, vertical: Int = 0) {
+    /// The characters a keypress types, or nil for anything that is not plain
+    /// typing (control keys, dead-key markers) so those fall through.
+    private func typedString(from event: NSEvent) -> String? {
+        guard let chars = event.characters, !chars.isEmpty else { return nil }
+        guard chars.unicodeScalars.allSatisfy({ !CharacterSet.controlCharacters.contains($0) }) else { return nil }
+        return chars
+    }
+
+    /// Delete on a lone selected cell (no caret) empties it, one undoable step.
+    private func clearSingleCellContent(_ target: GridCell) {
+        guard var c = cell(row: target.row, col: target.column), c.content.length > 0 else { return }
+        performUndoable("Delete Cell") {
+            c.content = NSAttributedString(string: "")
+            c.rawInnerHTML = nil
+            self.table.rows[target.row][target.column] = c
+            self.flushToDocument()
+            self.regenerateHTML()
+        }
+    }
+
+    /// Moves focus with spreadsheet wrapping inside the learned work range.
+    /// Tab/Shift-Tab walk a row, stepping to the next/previous row at its edges;
+    /// Enter/Shift-Enter walk a column, returning to the Tab series' origin
+    /// column when one is active. The range grows to every visited cell and is
+    /// clamped to the table's real bounds.
+    func moveFocus(from cell: GridCell, dx: Int = 0, dy: Int = 0,
+                   tab: Int = 0, enter: Int = 0) {
         guard !table.rows.isEmpty else { return }
         cellSelection = nil
+        var range = workRange ?? WorkRange(cell)
         var row = min(max(cell.row, 0), table.rows.count - 1)
         var col = min(max(cell.column, 0), max(table.rows[row].count - 1, 0))
-        if horizontal != 0 {
-            col += horizontal
-            if col < 0 {
-                if row > 0 {
-                    row -= 1
-                    col = table.rows[row].count - 1
+
+        if tab != 0 {
+            if tab > 0 {
+                // A forward Tab starts (or continues) a series from this column.
+                if tabOriginCol == nil { tabOriginCol = col }
+                if col < range.right {
+                    col += 1
                 } else {
-                    col = 0
-                }
-            } else if col >= table.rows[row].count {
-                if row < table.rows.count - 1 {
                     row += 1
-                    col = 0
+                    col = range.left
+                }
+            } else {
+                // Shift-Tab walks left; at the left edge it steps up a row.
+                if col > range.left {
+                    col -= 1
                 } else {
-                    col = table.rows[row].count - 1
+                    row -= 1
+                    col = range.right
                 }
             }
+        } else if enter != 0 {
+            // Enter returns to the Tab series' origin column when one is active,
+            // otherwise it stays in the current column.
+            let targetCol = (enter > 0 && tabOriginCol != nil) ? tabOriginCol! : col
+            row += (enter > 0) ? 1 : -1
+            col = targetCol
+            tabOriginCol = nil  // the series ends once Enter is used
+        } else {
+            // Arrows: a plain step.
+            row += dy
+            col += dx
         }
-        if vertical != 0 {
-            row = min(max(row + vertical, 0), table.rows.count - 1)
-            col = min(col, max(table.rows[row].count - 1, 0))
-        }
-        focusedCell = GridCell(row: row, column: col)
+
+        // Clamp to the real table (the range may outlive a structural change).
+        row = min(max(row, 0), table.rows.count - 1)
+        col = min(max(col, 0), max(table.rows[row].count - 1, 0))
+        let dest = GridCell(row: row, column: col)
+        range.grow(to: dest)
+        workRange = range
+        focusedCell = dest
+    }
+
+    /// Drops the learned navigation state. Called on a click, a document
+    /// switch, and undo/redo so a fresh start wraps from the new cell.
+    func resetNavigation() {
+        workRange = nil
+        tabOriginCol = nil
     }
 
     func regenerateHTML() {
@@ -547,6 +695,7 @@ final class TableViewModel {
             self.table.normalize()
             self.ensureSizing()
             self.focusedCell = GridCell(row: index, column: cell.column)
+            self.resetNavigation()
             self.flushToDocument()
             self.regenerateHTML()
         }
@@ -591,6 +740,7 @@ final class TableViewModel {
             self.ensureSizing()
             let col = min(boundary, max(self.table.rows[cell.row].count - 1, 0))
             self.focusedCell = GridCell(row: cell.row, column: col)
+            self.resetNavigation()
             self.flushToDocument()
             self.regenerateHTML()
         }
@@ -1705,6 +1855,8 @@ final class TableViewModel {
         rowHeights = document.rowHeights
         focusedCell = GridCell(row: 0, column: 0)
         cellSelection = nil
+        cellMode = .selected
+        resetNavigation()
         ensureSizing()
         // Fresh tables grow from the default height to fit their text; revisits
         // carry exact heights. restore() deliberately skips this: snapshots are exact.
