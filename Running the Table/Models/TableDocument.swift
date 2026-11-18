@@ -8,6 +8,9 @@ struct TableDocument: Identifiable {
     // must not inherit another table's resized widths and heights.
     var columnWidths: [CGFloat] = []
     var rowHeights: [CGFloat] = []
+    // Last content edit, in-memory; persisted as the file's mtime on save so the
+    // sidebar's most-recent-first order survives a relaunch.
+    var lastEdited: Date? = nil
 
     var id: UUID { table.id }
 

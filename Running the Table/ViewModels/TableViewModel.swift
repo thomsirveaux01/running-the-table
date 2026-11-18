@@ -241,6 +241,7 @@ final class TableViewModel {
         contentRevision += 1
         let after = currentSnapshot()
         registerSnapshotUndo(name: name, undoTo: before, redoTo: after)
+        bumpEditOrder()
     }
 
     func registerSnapshotUndo(name: String, undoTo: EditorSnapshot, redoTo: EditorSnapshot) {
@@ -258,6 +259,7 @@ final class TableViewModel {
     func registerResizeUndo(name: String, before: EditorSnapshot) {
         closeTypingGroup()
         registerSnapshotUndo(name: name, undoTo: before, redoTo: currentSnapshot())
+        bumpEditOrder()
     }
 
     // Menu undo/redo when no cell view has focus: close the open typing run
@@ -329,6 +331,7 @@ final class TableViewModel {
         flushToDocument()
         regenerateHTML()
         contentRevision += 1
+        bumpEditOrder()
     }
 
     // Later edits must never mutate state captured in a snapshot.
@@ -349,6 +352,19 @@ final class TableViewModel {
         documents.firstIndex { $0.id == selectedDocumentID }
     }
 
+    /// Notes-style order: the table just edited jumps to the top of the sidebar.
+    /// No-op when it is already first, so a typing run costs at most one move.
+    private func bumpEditOrder() {
+        guard let id = selectedDocumentID,
+              let idx = documents.firstIndex(where: { $0.id == id }) else { return }
+        documents[idx].lastEdited = Date()
+        if idx != 0 {
+            withAnimation {
+                documents.move(fromOffsets: IndexSet(integer: idx), toOffset: 0)
+            }
+        }
+    }
+
     // Bounds-safe: SwiftUI bindings may be stale while the table mutates.
     func cell(row: Int, col: Int) -> TableCell? {
         guard table.isValid(row: row, col: col) else { return nil }
@@ -367,6 +383,7 @@ final class TableViewModel {
         regenerateHTML()
         contentRevision += 1
         appendTypingChange(key: GridCell(row: row, column: col), name: "Edit Text", before: before)
+        bumpEditOrder()
     }
 
     func updateCellSelection(row: Int, col: Int, _ range: NSRange) {
@@ -486,6 +503,7 @@ final class TableViewModel {
         keepFocusValid()
         contentRevision += 1
         appendTypingChange(key: Self.htmlEditorKey, name: "Edit HTML", before: before)
+        bumpEditOrder()
     }
 
     private func flushToDocument() {
@@ -1019,6 +1037,7 @@ final class TableViewModel {
         // caption typing would land in the model but not on screen.
         contentRevision += 1
         appendTypingChange(key: Self.captionKey, name: "Edit Caption", before: before)
+        bumpEditOrder()
     }
 
     func toggleCaption() {
@@ -1271,8 +1290,9 @@ final class TableViewModel {
 
     func newTable() {
         flushToDocument()
-        let doc = TableDocument.new(name: "Table \(documents.count + 1)")
-        documents.append(doc)
+        var doc = TableDocument.new(name: "Table \(documents.count + 1)")
+        doc.lastEdited = Date()
+        withAnimation { documents.insert(doc, at: 0) }
         loadDocument(doc)
         sidebarSelection = [doc.id]
     }
@@ -1453,16 +1473,18 @@ final class TableViewModel {
         let beforeDocuments = deepCopied(documents)
         let beforeSelection = selectedDocumentID
 
-        var copyIDs: [UUID] = []
+        // Copies land at the top in source order: a duplicate is the freshest content.
+        var copies: [TableDocument] = []
         for source in ordered {
             // Fresh cells and a fresh id: editing the copy must not touch the source.
             var copyTable = source.table.deepCopied(id: UUID())
             copyTable.name = uniqueTableName(source.name)
-            let copy = TableDocument(table: copyTable, fileURL: nil)
-            guard let idx = documents.firstIndex(where: { $0.id == source.id }) else { continue }
-            documents.insert(copy, at: idx + 1)
-            copyIDs.append(copy.id)
+            var copy = TableDocument(table: copyTable, fileURL: nil)
+            copy.lastEdited = Date()
+            copies.append(copy)
         }
+        withAnimation { documents.insert(contentsOf: copies, at: 0) }
+        let copyIDs = copies.map(\.id)
         guard let lastID = copyIDs.last, let lastDoc = document(id: lastID) else { return }
         loadDocument(lastDoc)
         sidebarSelection = Set(copyIDs)
@@ -1635,8 +1657,9 @@ final class TableViewModel {
         var table = template.table.deepCopied(id: UUID())
         table.name = uniqueName(template.name, avoiding: Set(documents.map(\.name)))
         table.normalize()
-        let doc = TableDocument(table: table, fileURL: nil)
-        documents.append(doc)
+        var doc = TableDocument(table: table, fileURL: nil)
+        doc.lastEdited = Date()
+        withAnimation { documents.insert(doc, at: 0) }
         loadDocument(doc)
         sidebarSelection = [doc.id]
     }
@@ -1836,7 +1859,12 @@ final class TableViewModel {
             }
             savedHTML[documents[idx].id] = html
             documents[idx].fileURL = url
-            if let mtime = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate {
+            // The array is newest-first but written in order, so raw write mtimes
+            // would invert the sidebar order on relaunch; pin mtime to lastEdited.
+            if let lastEdited = documents[idx].lastEdited,
+               (try? fm.setAttributes([.modificationDate: lastEdited], ofItemAtPath: url.path)) != nil {
+                modifiedDates[documents[idx].id] = lastEdited
+            } else if let mtime = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate {
                 modifiedDates[documents[idx].id] = mtime
             }
         }
@@ -1930,23 +1958,34 @@ final class TableViewModel {
     }
 
     private static func loadStoredDocuments() -> [TableDocument] {
+        // The sidebar orders by last edited, so fetch each file's mtime in the same
+        // directory enumeration instead of statting one file at a time (a synced
+        // library folder makes a per-file stat a network round trip).
+        let keys: [URLResourceKey] = [.contentModificationDateKey]
         let urls = (try? FileManager.default.contentsOfDirectory(at: saveDirectory,
-                                                                 includingPropertiesForKeys: nil)) ?? []
-        let docs: [TableDocument] = urls
+                                                                 includingPropertiesForKeys: keys)) ?? []
+        let dated: [(url: URL, mtime: Date?)] = urls
             .filter { $0.pathExtension.lowercased() == "html" && !$0.lastPathComponent.hasPrefix(".") }
-            .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
-            .compactMap { url in
-                guard let html = try? String(contentsOf: url, encoding: .utf8) else {
-                    NSLog("Skipping unreadable table file: \(url.path)")
-                    return nil
-                }
-                let rawName = url.deletingPathExtension().lastPathComponent
-                // Legacy saves named "----.html" surface as "Untitled Table".
-                let stemName = Self.sanitizedFileName(rawName) == "Untitled Table" ? "Untitled Table" : rawName
-                let parsed = HTMLParser.parseTable(html)
-                return TableDocument(table: Table.loaded(from: parsed, name: stemName), fileURL: url)
+            .map { url in (url, (try? url.resourceValues(forKeys: Set(keys)))?.contentModificationDate) }
+            .sorted { a, b in
+                // Newest first; a missing or equal mtime falls back to name for a stable order.
+                if let a = a.mtime, let b = b.mtime, a != b { return a > b }
+                return a.url.lastPathComponent.localizedStandardCompare(b.url.lastPathComponent) == .orderedAscending
             }
-        return docs
+        return dated.compactMap { url, mtime in
+            guard let html = try? String(contentsOf: url, encoding: .utf8) else {
+                NSLog("Skipping unreadable table file: \(url.path)")
+                return nil
+            }
+            let rawName = url.deletingPathExtension().lastPathComponent
+            // Legacy saves named "----.html" surface as "Untitled Table".
+            let stemName = Self.sanitizedFileName(rawName) == "Untitled Table" ? "Untitled Table" : rawName
+            let parsed = HTMLParser.parseTable(html)
+            var doc = TableDocument(table: Table.loaded(from: parsed, name: stemName), fileURL: url)
+            // Seed lastEdited from the mtime so a reload keeps the persisted order.
+            doc.lastEdited = mtime
+            return doc
+        }
     }
 
     func copyHTMLToClipboard() {
@@ -2016,8 +2055,9 @@ final class TableViewModel {
         let beforeSelection = selectedDocumentID
 
         let table = Table.loaded(from: parsed, name: uniquePastedName())
-        let doc = TableDocument(table: table, fileURL: nil)
-        documents.append(doc)
+        var doc = TableDocument(table: table, fileURL: nil)
+        doc.lastEdited = Date()
+        withAnimation { documents.insert(doc, at: 0) }
         loadDocument(doc)
         sidebarSelection = [doc.id]
 
@@ -2067,8 +2107,9 @@ final class TableViewModel {
             TableRow(cells: row.map { TableCell(content: HTMLParser.plainAttributed($0)) })
         }, name: displayName)
         table.normalize()
-        let doc = TableDocument(table: table, fileURL: nil)
-        documents.append(doc)
+        var doc = TableDocument(table: table, fileURL: nil)
+        doc.lastEdited = Date()
+        withAnimation { documents.insert(doc, at: 0) }
         loadDocument(doc)
         sidebarSelection = [doc.id]
 
@@ -2138,16 +2179,20 @@ final class TableViewModel {
         var taken = Set(documents.map(\.name))
         var firstID: UUID?
         var firstDisplayName = ""
+        var newDocs: [TableDocument] = []
         for f in found {
             let base = (f.title?.isEmpty == false) ? f.title! : nameFallback
             let displayName = uniqueName(base, avoiding: taken)
             taken.insert(displayName)
             if firstID == nil { firstDisplayName = displayName }
             let table = Table.loaded(from: HTMLParser.parseTable(f.html), name: displayName)
-            let doc = TableDocument(table: table, fileURL: nil)
-            documents.append(doc)
+            var doc = TableDocument(table: table, fileURL: nil)
+            doc.lastEdited = Date()
+            newDocs.append(doc)
             if firstID == nil { firstID = doc.id }
         }
+        // File order is preserved: the first table in the file lands at the top.
+        withAnimation { documents.insert(contentsOf: newDocs, at: 0) }
         if let firstID, let doc = documents.first(where: { $0.id == firstID }) {
             loadDocument(doc)
             sidebarSelection = [firstID]
