@@ -20,9 +20,8 @@ struct HTMLAttribute: Equatable {
     var value: String
 }
 
-/// One table row plus the markup the cell grid cannot carry: verbatim row
-/// attributes and section membership. The collection conformance keeps the
-/// rows[row][col] call sites compiling unchanged.
+/// One table row plus the markup the cell grid cannot carry: verbatim row attributes
+/// and section membership. Collection conformance keeps rows[row][col] call sites unchanged.
 struct TableRow {
     var cells: [TableCell]
     var rawAttributes: String = ""

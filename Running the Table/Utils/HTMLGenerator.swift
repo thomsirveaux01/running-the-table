@@ -99,9 +99,8 @@ enum HTMLGenerator {
         escapeHTML(string).replacingOccurrences(of: "\"", with: "&quot;")
     }
 
-    /// The model owns the cell's text-align; the author's declarations ride
-    /// verbatim in the attribute text, so the declaration is merged into the
-    /// existing style attribute (or created when the author left it out).
+    /// The model owns the cell's text-align; the author's declarations ride verbatim in
+    /// the attribute text, so it merges into the existing style (or creates one).
     private static func mergeAlignment(_ attrs: String, alignment: NSTextAlignment) -> String {
         guard alignment != .left else { return attrs }
         let value = alignment.htmlName
@@ -118,8 +117,7 @@ enum HTMLGenerator {
         return before + "style=\"\(updated)\"" + after
     }
 
-    /// The value of a style attribute in an attribute string, unquoted and
-    /// empty when there is none.
+    /// The value of a style attribute in an attribute string, unquoted and empty when there is none.
     private static func styleValue(from match: NSTextCheckingResult, in text: String) -> String {
         let ns = text as NSString
         for groupIndex in 1...3 {

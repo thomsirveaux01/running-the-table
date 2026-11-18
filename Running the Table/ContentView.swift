@@ -3,9 +3,9 @@ import SwiftUI
 
 struct ContentView: View {
     @Bindable var viewModel: TableViewModel
-    // Defaulted so the offscreen probes keep compiling without owning one.
-    @ObservedObject var updater: UpdateChecker = UpdateChecker()
-    @ObservedObject var library: LibraryCoordinator = LibraryCoordinator()
+    // Defaulted so test harnesses can host ContentView without owning one.
+    var updater: UpdateChecker = UpdateChecker()
+    @Bindable var library: LibraryCoordinator = LibraryCoordinator()
     // Custom toggle instead of the system one: SwiftUI parks the system toggle
     // behind a flexible space, so it slides on every collapse.
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
@@ -39,8 +39,6 @@ struct ContentView: View {
                 emptyState
             }
         })
-        // New-table lives in EditorView's trailing toolbar: the leading region
-        // reserves a 53pt toggle slot that shifts when the sidebar collapses.
         // Opaque toolbar surface so sidebar material doesn't reach the title bar.
         .toolbarBackground(Color(nsColor: .windowBackgroundColor), for: .windowToolbar)
         // Root-level sheets: the save prompt opens from the sidebar menu too,
@@ -182,8 +180,7 @@ struct ContentView: View {
         case .upToDate:
             return "Version \(updater.currentVersion) is the latest release."
         case .checkFailed:
-            // Vague on purpose: covers dead networks, rate limits, and a 404
-            // (no release published yet) alike.
+            // Vague on purpose: covers dead networks, rate limits, and a 404 (no release published yet) alike.
             return "Couldn't check for updates. Try again later."
         case nil:
             return ""
@@ -247,10 +244,8 @@ struct SidebarView: View {
         List(selection: Binding(
             get: { viewModel.listSelectionSnapshot },
             set: { newValue in
-                // SwiftUI hands the List's selection change to this setter during
-                // its own view-update pass; applySidebarSelection loads a document,
-                // which would publish mid-update. Defer via the request so a lone
-                // click loads on the next turn and a burst coalesces into one.
+                // SwiftUI hands the List's selection change to this setter during its own view-
+                // update pass; loading there would publish mid-update. Defer to coalesce bursts.
                 viewModel.requestSidebarSelection(newValue)
             }
         )) {
@@ -262,8 +257,7 @@ struct SidebarView: View {
                            endEdit: {
                                guard editingID == document.id else { return }
                                editingID = nil
-                               // The name changed on each keystroke; now move
-                               // the file to match it.
+                               // The name changed on each keystroke; now move the file to match it.
                                viewModel.commitInlineRename(document.id)
                            })
                     .tag(document.id)
@@ -272,8 +266,7 @@ struct SidebarView: View {
                         onDelete: { viewModel.deleteDocument(document.id) },
                         onRevealedChange: { swipedID = $0 ? document.id : nil }))
                     .contextMenu {
-                        // Finder-style: the row is in a ⌘-selection, so the
-                        // bulk commands take the whole set.
+                        // Finder-style: the row is in a ⌘-selection, so the bulk commands take the whole set.
                         let targetIDs = viewModel.sidebarSelection.contains(document.id)
                             ? viewModel.sidebarSelection
                             : [document.id]
@@ -299,8 +292,7 @@ struct SidebarView: View {
             }
         }
         .listStyle(.sidebar)
-        // Works only while the list itself has focus (not mid-rename); the
-        // whole ⌘-selection goes.
+        // Works only while the list itself has focus (not mid-rename); the whole ⌘-selection goes.
         .onKeyPress(.delete) {
             guard viewModel.selectedDocumentID != nil else { return .ignored }
             viewModel.deleteSelectedDocument()
@@ -388,14 +380,11 @@ struct SidebarRow: View {
                 .foregroundStyle(.secondary)
         }
         .padding(.vertical, 2)
-        // Click-to-open fast path. List's selection binding swallows roughly
-        // one in two rapid clicks while reconciling the previous switch; the
-        // tap delivers regardless, and List's own set (or a late echo) then
-        // dedupes in applySidebarSelection. ⌘-click stays on the List path
-        // for multi-select.
+        // Click-to-open fast path: List swallows rapid clicks mid-reconcile;
+        // the tap always lands (⌘ keeps List's path for multi-select).
         .simultaneousGesture(TapGesture().onEnded {
             guard !NSEvent.modifierFlags.contains(.command) else { return }
-            viewModel.requestSidebarSelection([documentID], src: "tap")
+            viewModel.requestSidebarSelection([documentID])
         })
         .onChange(of: isEditing) { _, editing in
             if editing {
@@ -408,9 +397,8 @@ struct SidebarRow: View {
     }
 }
 
-/// Update-available sheet: one-line announcement, bulleted release notes
-/// capped at a scrollable height so a long list cannot break the window,
-/// then the actions (Download is the default button).
+/// Update-available sheet: one-line announcement, bulleted release notes capped at a
+/// scrollable height so a long list cannot break the window, then the actions.
 struct UpdatePromptView: View {
     let version: String
     let notes: String
@@ -419,7 +407,7 @@ struct UpdatePromptView: View {
     var onLater: () -> Void
 
     // GitHub note bodies are markdown bullets; the dialog renders real ones.
-    // Internal so updateprompt_probe can pin the parsing.
+    // Internal so tests can pin the parsing.
     var bullets: [String] {
         notes.split(separator: "\n")
             .map { $0.trimmingCharacters(in: .whitespaces) }

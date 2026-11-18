@@ -2,11 +2,9 @@ import AppKit
 import Foundation
 import UniformTypeIdentifiers
 
-// RFC 4180 CSV: fields are delimiter-separated, records end on CRLF, LF, or a
-// bare CR, and a field may be quoted with double quotes — where "" is a
-// literal quote and delimiters/newlines are allowed inside. The parser is
-// lenient about junk after a closing quote; the encoder quotes only when a
-// field needs it and emits no trailing newline.
+// RFC 4180 CSV: fields are delimiter-separated, records end on CRLF, LF, or bare CR, and
+// a double-quoted field may contain "" quotes, delimiters, and newlines. The parser is
+// lenient about junk after a closing quote; the encoder quotes only when needed.
 
 enum CSV {
     private static let cr = Unicode.Scalar(13)!
@@ -53,9 +51,8 @@ enum CSV {
         return out
     }
 
-    // Quote only when the field holds the delimiter, a quote, or a newline;
-    // double any embedded quotes. Newlines are checked as scalars because a
-    // CRLF is one grapheme cluster and would slip past a Character search.
+    // Quote only when the field holds the delimiter, a quote, or a newline; double
+    // embedded quotes. Newlines are checked as scalars: CRLF is one grapheme cluster.
     private static func encodeField(_ field: String, _ delimiter: Character) -> String {
         let scalars = field.unicodeScalars
         guard field.contains(delimiter) || field.contains("\"")
@@ -83,8 +80,7 @@ enum CSV {
                     i += 1
                 }
             }
-            // Lenient: junk after the closing quote joins the field rather
-            // than being dropped.
+            // Lenient: junk after the closing quote joins the field rather than being dropped.
             while i < chars.count, chars[i] != delim, chars[i] != lf, chars[i] != cr {
                 field.append(Character(chars[i]))
                 i += 1
@@ -99,10 +95,8 @@ enum CSV {
     }
 }
 
-// File picking behind protocols so headless probes script the chosen URL
-// instead of raising a panel on the user's screen. Both present as a window-
-// modal sheet (anchored to the titlebar) via the documented beginSheetModal,
-// the same way the folder chooser does.
+// File picking behind protocols so tests script the chosen URL instead of raising a
+// panel. Both present as titlebar-anchored window-modal sheets via beginSheetModal.
 
 protocol CSVFileImporting {
     func chooseCSVFile(prompt: String, into window: NSWindow?, completion: @escaping (URL?) -> Void)
@@ -111,6 +105,32 @@ protocol CSVFileImporting {
 protocol CSVFileExporting {
     func chooseCSVFile(prompt: String, suggestedName: String, defaultURL: URL?,
                        into window: NSWindow?, completion: @escaping (URL?) -> Void)
+}
+
+/// The .plainText in each import panel is conformance-wide — md and csv both
+/// conform to it — so a delegate greys out the other importer's type. TXT passes both.
+final class ImportPanelFilter: NSObject, NSOpenSavePanelDelegate {
+    enum Kind { case csv, markdown }
+    private static let markdownTypes: [UTType] =
+        [UTType(filenameExtension: "md"), UTType("public.markdown")].compactMap { $0 }
+    private let kind: Kind
+    init(kind: Kind) { self.kind = kind }
+
+    static func allows(_ url: URL, kind: Kind) -> Bool {
+        var isDir: ObjCBool = false
+        if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue { return true }
+        let type = UTType(filenameExtension: url.pathExtension.lowercased()) ?? .plainText
+        switch kind {
+        case .csv: return !markdownTypes.contains { type.conforms(to: $0) }
+        case .markdown: return !type.conforms(to: .commaSeparatedText)
+        }
+    }
+
+    func panel(_ sender: Any, shouldEnable url: URL) -> Bool { Self.allows(url, kind: kind) }
+
+    // Panels hold their delegate weakly; process-lifetime singletons keep them alive.
+    static let csv = ImportPanelFilter(kind: .csv)
+    static let markdown = ImportPanelFilter(kind: .markdown)
 }
 
 struct SystemCSVImporter: CSVFileImporting {
@@ -122,6 +142,7 @@ struct SystemCSVImporter: CSVFileImporting {
         panel.allowsMultipleSelection = false
         panel.showsHiddenFiles = false
         panel.allowedContentTypes = [.commaSeparatedText, .plainText]
+        panel.delegate = ImportPanelFilter.csv
         // Anchored to the key window when there is one; the panel then slides
         // down from its titlebar instead of floating as a separate window.
         if let window = window ?? NSApp.keyWindow ?? NSApp.mainWindow {

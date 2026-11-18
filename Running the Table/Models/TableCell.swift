@@ -10,9 +10,8 @@ struct TableCell {
     /// Text alignment of the cell's content; the model's own attribute that
     /// rides in the cell's style attribute on export.
     var alignment: NSTextAlignment = .left
-    /// Verbatim attribute text as parsed, minus colspan/rowspan (which the
-    /// model owns); re-emitted untouched so unedited cells keep style, scope,
-    /// class and anything else the grid cannot represent.
+    /// Verbatim attribute text as parsed, minus colspan/rowspan (the model owns
+    /// those); re-emitted untouched so unedited cells keep style, scope, and class.
     var rawAttributes: String = ""
     /// Verbatim cell interior as parsed. The first content edit clears it,
     /// making the attributed content the source of truth from then on.
@@ -45,8 +44,7 @@ struct TableCell {
 
     var fullRange: NSRange { NSRange(location: 0, length: content.length) }
 
-    /// Snapshot copy with a fresh attributed string; undo captures must not
-    /// share storage with live cells.
+    /// Snapshot copy with a fresh attributed string; undo captures must not share storage with live cells.
     func deepCopy() -> TableCell {
         var copy = self
         copy.content = NSAttributedString(attributedString: content)
@@ -74,8 +72,7 @@ extension NSTextAlignment {
         }
     }
 
-    /// The Cocoa-standard alignment chord key (⌘{ / ⌘| / ⌘}, as in
-    /// TextEdit, Notes, and Pages).
+    /// The Cocoa-standard alignment chord key (⌘{ / ⌘| / ⌘}, as in TextEdit, Notes, and Pages).
     var alignKey: Character {
         switch self {
         case .left: return "{"

@@ -1,12 +1,8 @@
 import AppKit
 import SwiftUI
 
-/// The WYSIWYG grid entry point. The layout itself lives in TableGridView
-/// (one AppKit document view that draws every cell and parks a single shared
-/// editor on the focused cell); this wrapper keeps the SwiftUI entry point the
-/// editor and the probes construct, and lists the view-model properties whose
-/// changes must re-run the grid's sync. The geometry constants and coordinate
-/// math below are the contract the gridlayout/rowbound/handlepos probes pin.
+/// The WYSIWYG grid entry point: wraps TableGridView (one AppKit document view drawing
+/// every cell with a shared editor) and lists the view-model properties whose changes re-sync it.
 struct WYSIWYGView: View {
     var viewModel: TableViewModel
 
@@ -15,15 +11,13 @@ struct WYSIWYGView: View {
     static let gutterWidth: CGFloat = 22
     static let columnGutterHeight: CGFloat = 22
     static let captionHeight: CGFloat = 28
-    /// How far a dragged strip's preview may lead the cursor; the offset
-    /// eases toward min(raw translation, this), so slots glide instead of
-    /// teleporting a whole row ahead of the pointer.
+    /// How far a dragged strip's preview may lead the cursor; the offset eases toward
+    /// min(raw translation, this), so slots glide instead of teleporting ahead of the pointer.
     static let followSlack: CGFloat = 8
 
     var body: some View {
-        // Touch every property a layout change depends on: @Observable only
-        // invalidates the view for properties read during body evaluation,
-        // and TableGridView reads them later, inside updateNSView.
+        // Touch every property a layout change depends on: @Observable only invalidates
+        // for properties read during body, and TableGridView reads them in updateNSView.
         _ = (viewModel.table, viewModel.columnWidths, viewModel.rowHeights,
              viewModel.contentRevision, viewModel.cellSelection,
              viewModel.focusedCell, viewModel.hasCaption)
@@ -61,10 +55,8 @@ struct WYSIWYGView: View {
         return left(target)
     }
 
-    /// Maps a point in the grid document view's top-origin coordinates (where
-    /// drag events land) to a visual cell, clamped so drags into the gutters
-    /// or past the far edges extend to the border cells. `captionOffset` is
-    /// the vertical space the caption band pushes the grid down by.
+    /// Maps top-origin drag coordinates to a visual cell, clamped so gutter or far-edge drags
+    /// extend to the border cells. `captionOffset` is the space the caption band pushes down.
     static func visualCell(at point: NSPoint, columnWidths: [CGFloat],
                            rowHeights: [CGFloat], captionOffset: CGFloat = 0) -> VisualCell? {
         guard !columnWidths.isEmpty, !rowHeights.isEmpty else { return nil }

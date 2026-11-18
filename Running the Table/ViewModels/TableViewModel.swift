@@ -2,17 +2,9 @@ import AppKit
 import Observation
 import SwiftUI
 
-// TEMP RTSWITCH click→pixel tracer (Nov 17 hitch diagnosis; remove after use).
-// Same clock as NSEvent.timestamp (seconds since boot), so ages are directly
-// comparable across every stage.
-enum RTSwitchTrace {
-    static var gen = 0
-    static var lastBeat: Double = 0
+/// Counts sidebar requests so the click-rescue monitor tells answered clicks from swallowed ones.
+enum SidebarClickGuard {
     static var requestCount = 0
-    static var now: Double { ProcessInfo.processInfo.systemUptime * 1000 }
-    static func log(_ msg: String) {
-        NSLog("RTSWITCH gen=\(gen) t=\(String(format: "%.1f", now)) \(msg)")
-    }
 }
 
 struct GridCell: Hashable {
@@ -20,8 +12,7 @@ struct GridCell: Hashable {
     var column: Int
 }
 
-/// Layout-space cell coordinates: columns are the grid's visual columns, so
-/// a colspan cell covers several, unlike array-indexed GridCell.
+/// Layout-space coords: colspan cells cover several visual columns, unlike array-indexed GridCell.
 struct VisualCell: Equatable {
     var row: Int
     var column: Int
@@ -34,17 +25,14 @@ struct VisualCellRange: Equatable {
     var colStart: Int
     var colEnd: Int
 
-    /// True when a slot, which may span several columns and rows, intersects
-    /// the range.
     func intersects(row: Int, rowSpan: Int = 1, startCol: Int, span: Int) -> Bool {
         row <= rowEnd && row + rowSpan - 1 >= rowStart
             && startCol <= colEnd && startCol + span - 1 >= colStart
     }
 }
 
-/// Full editor state captured to revert one undo step. The whole Table (not
-/// just rows) rides along so captions, sections and pass-through markup undo
-/// with the cells around them.
+/// Full editor state captured to revert one undo step. The whole Table (not just
+/// rows) rides along so captions, sections and pass-through markup undo with cells.
 struct EditorSnapshot {
     let documentID: UUID?
     let table: Table
@@ -69,7 +57,6 @@ final class TableViewModel {
     var focusedCell: GridCell? {
         didSet {
             guard focusedCell != oldValue else { return }
-            // Typing runs end when focus moves to another cell.
             closeTypingGroup()
             if let f = focusedCell, let c = cell(row: f.row, col: f.column) {
                 selectionRange = c.selectionRange
@@ -79,30 +66,25 @@ final class TableViewModel {
         }
     }
     // Plain var, not observed: nothing renders it, and mutating it from
-    // focusedCell's didSet during a view update trips SwiftUI's "publishing
-    // from within view updates" fault.
+    // focusedCell's didSet during a view update trips SwiftUI's publishing fault.
     @ObservationIgnored
     var selectionRange = NSRange(location: 0, length: 0)
-    /// Rectangular drag selection in visual coordinates; nil when none.
     var cellSelection: VisualCellRange?
     var columnWidths: [CGFloat] = []
     var rowHeights: [CGFloat] = []
     var showLinkPrompt = false
     var linkURLText = ""
-    /// True while a text view owns the caret; the ⌘⌫ delete-table chord disables
-    /// itself so the keystroke stays a text-editing command.
+    /// True while a text view owns the caret; the ⌘⌫ chord disables itself so the key stays a text command.
     private(set) var isEditingText = false
 
-    /// Table snapshots offered by New from Template. They live in a subfolder,
-    /// so loadStoredDocuments never lists them as tables.
+    /// New from Template snapshots; they live in a subfolder, so loadStoredDocuments never lists them.
     private(set) var templates: [TableDocument] = []
     var showTemplatePrompt = false
     var templateNameText = ""
     var showTemplateManager = false
     var showRenamePrompt = false
     var renameTitleText = ""
-    /// Markdown export prompt: the loss list, or a refusal when the table has
-    /// no header row (Markdown requires one).
+    /// Markdown export prompt: the loss list, or a refusal when the table has no header row.
     var showMarkdownExportPrompt = false
     var markdownExportLosses: [String] = []
     var markdownExportBlocked = false
@@ -110,8 +92,7 @@ final class TableViewModel {
     var renameFileNameDisplay: String {
         Self.sanitizedFileName(renameTitleText.trimmingCharacters(in: .whitespacesAndNewlines))
     }
-    /// Notes on dropped or unclosed markup in the latest source-pane parse;
-    /// empty whenever the grid generated the HTML.
+    /// Notes on dropped or unclosed markup in the latest source-pane parse; empty for grid HTML.
     private(set) var markupDiagnostics: [String] = []
     @ObservationIgnored private var renamingID: UUID?
     @ObservationIgnored private var templateDraftTable: Table?
@@ -125,9 +106,7 @@ final class TableViewModel {
     static let minRowHeight: CGFloat = 24
 
     // Layout-scan cache: every move handle asks "can I travel?" on every
-    // update, and each question used to re-run the full gridScan. Keying the
-    // scan and the gates on the span geometry makes the reads O(1) between
-    // structure changes.
+    // update; these read the cache instead of re-running the full gridScan.
     @ObservationIgnored private var placementsFingerprint = -1
     @ObservationIgnored private var placementsSlots: [[Table.CellPlacement]] = []
     @ObservationIgnored private var canMoveRowCache: [Int: Bool] = [:]
@@ -144,8 +123,7 @@ final class TableViewModel {
         return placementsSlots
     }
 
-    /// Cached twin of Table.rowspanCrosses for the single-row gate the
-    /// travel/remove/duplicate checks all share.
+    /// Cached twin of Table.rowspanCrosses for the shared travel/remove/duplicate gate.
     private func rowTravelable(_ row: Int) -> Bool {
         if let hit = canMoveRowCache[row] { return hit }
         let ok = table.rows.indices.contains(row) && !cachedRowspanCrosses(row)
@@ -171,9 +149,8 @@ final class TableViewModel {
     }
 
     init() {
-        // One-time title-store migration. With a stored grant the library
-        // isn't reachable yet (the container is), so it runs in
-        // reloadFromDisk once launchOnce resolves the grant instead.
+        // One-time title-store migration. With a stored grant the library isn't
+        // reachable yet, so it runs in reloadFromDisk once launchOnce resolves it.
         if LibraryLocation.defaults.data(forKey: LibraryLocation.bookmarkKey) == nil {
             Self.migrateTitleStoreIfNeeded()
         }
@@ -216,8 +193,6 @@ final class TableViewModel {
     /// the running app (Settings change or container fallback).
     func reloadFromDisk() {
         flushToDocument()
-        // The grant is resolved by the time this runs, so the library is
-        // reachable and the one-time title-store migration is safe here.
         Self.migrateTitleStoreIfNeeded()
         documents = Self.loadStoredDocuments()
         templates = Self.loadStoredTemplates()
@@ -256,7 +231,6 @@ final class TableViewModel {
     static let htmlEditorKey = GridCell(row: -1, column: -1)
     static let typingCoalesceInterval: TimeInterval = 1.0
 
-    // Captures state around a mutation and records one undo/redo pair.
     func performUndoable(_ name: String, _ mutate: () -> Void) {
         closeTypingGroup()
         let before = currentSnapshot()
@@ -270,7 +244,6 @@ final class TableViewModel {
         // With groupsByEvent off, Foundation requires explicit undo groups.
         undoManager.beginUndoGrouping()
         undoManager.registerUndo(withTarget: self) { target in
-            // Register the redo pair before reverting.
             target.registerSnapshotUndo(name: name, undoTo: redoTo, redoTo: undoTo)
             target.restore(undoTo)
         }
@@ -296,7 +269,6 @@ final class TableViewModel {
         undoManager.redo()
     }
 
-    // Extend or open a typing run for a cell or the HTML pane.
     private func appendTypingChange(key: GridCell, name: String, before: EditorSnapshot) {
         if let pending = pendingTyping, pending.key == key, pending.name == name {
             // Keep the earliest snapshot so one undo reverts the whole run.
@@ -308,7 +280,6 @@ final class TableViewModel {
         restartTypingTimer()
     }
 
-    // Commit the open typing run as one undo step.
     func closeTypingGroup() {
         typingTimer?.invalidate()
         typingTimer = nil
@@ -344,8 +315,7 @@ final class TableViewModel {
             table = doc.table
         }
         var restored = snapshot.table.deepCopied()
-        // The title is document state with its own undo path; row edits must
-        // not resurrect an old name.
+        // The title is document state with its own undo path; row edits must not resurrect an old name.
         restored.name = table.name
         table = restored
         columnWidths = snapshot.columnWidths
@@ -386,11 +356,9 @@ final class TableViewModel {
         guard let existing = cell(row: row, col: col), !existing.content.isEqual(to: content) else { return }
         let before = currentSnapshot()
         table.rows[row][col].content = content
-        // The parsed verbatim interior is now stale; content is the source
-        // of truth from here on.
+        // The parsed verbatim interior is now stale; content is the source of truth.
         table.rows[row][col].rawInnerHTML = nil
         clampSelection(inRow: row, col: col)
-        // Wrapped text that outgrew the row pushes its height up (grow-only).
         growRowIfNeeded(row)
         flushToDocument()
         regenerateHTML()
@@ -404,9 +372,8 @@ final class TableViewModel {
         if focusedCell == GridCell(row: row, column: col) {
             selectionRange = range
         }
-        // Writing the cell mutates the observed table, which invalidates every
-        // view that reads it — so caret moves that don't change the stored
-        // range must not churn it.
+        // Writing the cell mutates the observed table, invalidating every reader —
+        // caret moves that don't change the stored range must not churn it.
         guard var c = cell(row: row, col: col), c.selectionRange != range else { return }
         c.selectionRange = range
         table.rows[row][col] = c
@@ -452,7 +419,6 @@ final class TableViewModel {
             NSApp.keyWindow?.makeFirstResponder(nil)
             return true
         case Self.deleteKeyCode:
-            // A cell block deletes as a block; without one, text editing rules.
             return clearSelectedCells()
         default:
             return false
@@ -520,8 +486,8 @@ final class TableViewModel {
     }
 
     private func flushToDocument() {
-        // The @Published sink this replaces fired on every data mutation;
-        // flushToDocument is where every data-changing path passes through.
+        // The autosave chokepoint: every data-changing path passes through
+        // flushToDocument, so the schedule lives here and nowhere else.
         scheduleAutosave()
         guard let idx = currentDocumentIndex else { return }
         documents[idx].table = table
@@ -548,9 +514,8 @@ final class TableViewModel {
         let index = cell.row + (after ? 1 : 0)
         performUndoable(after ? "Add Row" : "Add Row Above") {
             let cols = max(self.table.columnCount, 1)
-            // Merges straddling the new boundary grow to cover the inserted
-            // row; normalize then pads or trims the new row against the
-            // resulting occupancy.
+            // Merges straddling the new boundary grow to cover the inserted row;
+            // normalize then pads or trims the new row against the new occupancy.
             for (origin, slots) in self.table.placements().enumerated() where origin < index {
                 for p in slots where p.rowSpan > 1 && origin + p.rowSpan - 1 >= index {
                     self.table.rows[origin][p.cellIndex].rowspan =
@@ -576,7 +541,6 @@ final class TableViewModel {
         let boundary = p.startCol + (after ? p.colSpan : 0)
         performUndoable(after ? "Add Column" : "Add Column Left") {
             let slots = self.table.placements()
-            // Merges the new column lands inside, by their origin rows.
             let straddlers = slots.enumerated().flatMap { row, rowSlots in
                 rowSlots.filter { $0.startCol < boundary && boundary < $0.startCol + $0.colSpan }
                     .map { (row: row, placement: $0) }
@@ -585,18 +549,16 @@ final class TableViewModel {
                 if let straddler = straddlers.first(where: {
                     row >= $0.row && row < $0.row + $0.placement.rowSpan
                 }) {
-                    // The new column belongs to the merge: the origin cell
-                    // widens, and rows the merge covers get no cell of their
-                    // own for it.
+                    // The new column belongs to the merge: the origin cell widens,
+                    // and rows the merge covers get no cell of their own for it.
                     if row == straddler.row {
                         self.table.rows[row][straddler.placement.cellIndex].colspan =
                             min(straddler.placement.colSpan + 1, TableCell.maxColspan)
                     }
                     continue
                 }
-                // Array order matches visual order, so inserting before the
-                // first own cell at or past the boundary (or appending) puts
-                // the new cell in the new column even in rowspan-covered rows.
+                // Array order matches visual order, so inserting before the first
+                // own cell at/past the boundary (or appending) holds even in covered rows.
                 let insertAt = slots[row].first { $0.startCol >= boundary }?.cellIndex
                     ?? self.table.rows[row].count
                 // A row that is nothing but headers keeps its header-ness:
@@ -613,7 +575,6 @@ final class TableViewModel {
         }
     }
 
-    /// The visual footprint of an array-indexed cell.
     private func placement(of cell: GridCell) -> Table.CellPlacement? {
         guard table.rows.indices.contains(cell.row),
               table.rows[cell.row].cells.indices.contains(cell.column) else { return nil }
@@ -633,8 +594,7 @@ final class TableViewModel {
         }
     }
 
-    /// Deleting a row a merge touches would tear the merge; those rows stay
-    /// undeletable until the merge is split.
+    /// Deleting a row a merge touches would tear the merge; undeletable until split.
     func canRemoveRow(_ row: Int) -> Bool {
         rowTravelable(row)
     }
@@ -661,8 +621,7 @@ final class TableViewModel {
         }
     }
 
-    /// A merge touching the column means wholesale removal would misalign the
-    /// cells around it; those columns stay un-deletable until split.
+    /// A merge touching the column would tear on removal; un-deletable until split.
     var canRemoveFocusedColumn: Bool {
         guard let f = focusedCell, table.columnCount > 1, let p = placement(of: f) else { return false }
         return !cachedColumnHasMerge(p.startCol)
@@ -671,8 +630,7 @@ final class TableViewModel {
     // MARK: - Duplicate row/column
 
     /// A row a rowspan touches can't be copied: the duplicate would overlap the
-    /// merge's covered rows, so those rows stay unduplicable until split (the
-    /// same gate as removeRow).
+    /// merge's covered rows (the same gate as removeRow).
     func canDuplicateRow(_ row: Int) -> Bool {
         rowTravelable(row)
     }
@@ -682,9 +640,8 @@ final class TableViewModel {
         return canDuplicateRow(f.row)
     }
 
-    /// Deep-copies the row and inserts the copy adjacent; fresh cells, so
-    /// editing one never touches the other. The copy keeps the source's height
-    /// and section (a <th> row duplicates as <th>).
+    /// Deep-copies the row and inserts the copy adjacent: fresh cells, keeping the
+    /// source's height and section (a <th> row duplicates as <th>).
     func duplicateRow(adjacentTo cell: GridCell, after: Bool) {
         guard canDuplicateRow(cell.row) else { return }
         let index = cell.row + (after ? 1 : 0)
@@ -709,8 +666,7 @@ final class TableViewModel {
     }
 
     /// A column any merge touches can't be copied: a colspan makes the copy
-    /// ambiguous and a rowspan leaves covered rows with no cell to copy (the
-    /// same gate as removeColumn).
+    /// ambiguous, a rowspan leaves covered rows with no cell to copy (as removeColumn).
     func canDuplicateColumn(_ col: Int) -> Bool {
         guard col >= 0, col < table.columnCount else { return false }
         return !cachedColumnHasMerge(col)
@@ -721,9 +677,8 @@ final class TableViewModel {
         return canDuplicateColumn(p.startCol)
     }
 
-    /// Deep-copies each row's cell in the column and inserts the copies
-    /// adjacent, so the new column carries the source's values, header status,
-    /// and width.
+    /// Deep-copies each row's cell in the column and inserts the copies adjacent,
+    /// so the new column carries the source's values, header status, and width.
     func duplicateColumn(adjacentTo cell: GridCell, after: Bool) {
         guard let p = placement(of: cell),
               let sourceIdx = cellIndex(containingColumn: p.startCol, in: table.rows[cell.row])
@@ -752,14 +707,12 @@ final class TableViewModel {
         duplicateColumn(adjacentTo: f, after: true)
     }
 
-    /// Rows a merge touches can't travel alone (the covered rows or the
-    /// merge's lower half would be left behind), so their handles sit idle.
+    /// Rows a merge touches can't travel alone; covered rows or the merge's lower half trail behind.
     func canMoveRow(_ row: Int) -> Bool {
         rowTravelable(row)
     }
 
-    // Height and focus travel with the row; the drag-start snapshot is the
-    // single undo step.
+    // Height and focus travel with the row; the drag-start snapshot is the single undo step.
     func moveRow(from source: Int, to destination: Int, before: EditorSnapshot) {
         let count = table.rows.count
         let dest = min(max(destination, 0), count - 1)
@@ -794,9 +747,8 @@ final class TableViewModel {
         return nil
     }
 
-    // A colspan cell wouldn't travel with the column, and a rowspan cell
-    // spans several rows of alignment, so merge-touched columns stay
-    // un-grabbable.
+    // A colspan cell wouldn't travel with the column, and a rowspan cell spans
+    // several rows of alignment, so merge-touched columns stay un-grabbable.
     func canMoveColumn(_ col: Int) -> Bool {
         guard col >= 0, col < table.columnCount else { return false }
         return !cachedColumnHasMerge(col)
@@ -816,8 +768,7 @@ final class TableViewModel {
         for row in table.rows.indices {
             guard let srcIdx = cellIndex(containingColumn: source, in: table.rows[row]),
                   let anchor = cellIndex(containingColumn: dest, in: table.rows[row]) else { continue }
-            // Moving right, the column lands after whatever owns the target
-            // column; moving left, before it.
+            // Moving right, the column lands after whatever owns the target column; moving left, before it.
             var insertAt = dest > source ? anchor + 1 : anchor
             let cell = table.rows[row].remove(at: srcIdx)
             if srcIdx < insertAt { insertAt -= 1 }
@@ -871,8 +822,7 @@ final class TableViewModel {
         setColspan(value, for: f)
     }
 
-    /// Cell-specific variant for the context menu, which acts on the
-    /// right-clicked cell (like the row/column commands) rather than the focus.
+    /// Context-menu variant: acts on the right-clicked cell, not the focused one.
     func setColspan(_ value: Int, for cell: GridCell) {
         guard let c = self.cell(row: cell.row, col: cell.column), c.colspan != value else { return }
         performUndoable("Set Column Span") {
@@ -890,16 +840,13 @@ final class TableViewModel {
         }
     }
 
-    /// Extending a span destroys the cells it swallows, content and all;
-    /// shrinking it — or extending past the table's edge — pads the row, and
-    /// every other row when the table grows, with fresh empty cells so the
-    /// grid stays rectangular.
+    /// Extending a span destroys the cells it swallows, content and all; shrinking it —
+    /// or extending past the edge — pads rows with empty cells so the grid stays rectangular.
     private func applyColspan(_ span: Int, to cell: GridCell) {
         guard let p = placement(of: cell) else { return }
         let end = p.startCol + span
-        // Swallowed cells: this row's own cells, after the target, whose
-        // visual start falls inside the new span. Placements run in array
-        // order, so remove from the back to keep indices valid.
+        // Swallowed cells: this row's own cells after the target whose visual start
+        // falls inside the new span; placements run in array order, so remove from the back.
         let doomed = table.placements()[cell.row]
             .filter { $0.cellIndex > cell.column && $0.startCol < end }
             .map(\.cellIndex)
@@ -907,15 +854,12 @@ final class TableViewModel {
             table.rows[cell.row].remove(at: index)
         }
         table.rows[cell.row][cell.column].colspan = span
-        // Pads the row (and, when the span widened the table, every row) back
-        // to full width; also trims anything left overfull.
         table.normalize()
     }
 
     func setAlignment(_ alignment: NSTextAlignment) {
         let targets = formattingCells()
         guard !targets.isEmpty else { return }
-        // Nothing to do when every targeted cell already carries the value.
         guard targets.contains(where: { cell(row: $0.row, col: $0.col)?.alignment != alignment }) else { return }
         performUndoable("Set Alignment") {
             for t in targets {
@@ -926,9 +870,8 @@ final class TableViewModel {
         }
     }
 
-    /// The alignment of the focused cell, or of every slot intersecting a
-    /// multi-cell selection; a mixed selection reports the default so the
-    /// toolbar button never lies.
+    /// The alignment of the focused cell, or of every slot intersecting the
+    /// selection; a mixed selection reports the default so the toolbar never lies.
     var alignment: NSTextAlignment {
         let targets = formattingCells()
         guard !targets.isEmpty else { return .left }
@@ -948,9 +891,8 @@ final class TableViewModel {
 
     // MARK: - Merging
 
-    /// The selection rectangle, validated for merging: bigger than one cell,
-    /// within the span limits, inside one row section, and no existing merge
-    /// crosses its border (those would be cut in half).
+    /// The selection rectangle validated for merging: bigger than one cell, within the
+    /// span limits, inside one row section, and no existing merge crosses its border.
     private var mergeRect: VisualCellRange? {
         guard let sel = cellSelection,
               table.rows.indices.contains(sel.rowStart),
@@ -973,8 +915,7 @@ final class TableViewModel {
 
     var canMergeSelection: Bool { mergeRect != nil }
 
-    /// Collapse the selection to its top-left cell, which keeps its content;
-    /// every other cell inside the rectangle is removed.
+    /// Collapse the selection to its top-left cell, which keeps its content; the rest are removed.
     func mergeSelection() {
         guard let sel = mergeRect else { return }
         performUndoable("Merge Cells") {
@@ -1011,8 +952,7 @@ final class TableViewModel {
         return p.colSpan > 1 || p.rowSpan > 1
     }
 
-    /// Undo one merge: the cell goes back to 1×1 and empty cells take back
-    /// the columns it freed, in its row and in every row it covered.
+    /// Undo one merge: back to 1×1; empty cells reclaim the freed columns in every covered row.
     func splitFocusedCell() {
         guard let f = focusedCell, let p = placement(of: f), p.colSpan > 1 || p.rowSpan > 1 else { return }
         performUndoable("Split Cells") {
@@ -1104,8 +1044,7 @@ final class TableViewModel {
         }
     }
 
-    /// A row keeps <thead> only while it is nothing but header cells; a row
-    /// that gains a plain cell drops to the body. toggleHeader adds it back.
+    /// A row keeps <thead> only while it is nothing but header cells; toggleHeader adds it back.
     private func demoteNonHeaderRows() {
         for row in table.rows.indices
         where table.rows[row].section == .head && !table.rows[row].allHeaders {
@@ -1146,8 +1085,7 @@ final class TableViewModel {
         var cleaned: [HTMLAttribute] = []
         for attribute in attributesDraft {
             let name = attribute.name.trimmingCharacters(in: .whitespaces).lowercased()
-            // Titles live in file names; a hand-typed legacy attribute is
-            // dropped rather than re-emitted.
+            // Titles live in file names; a hand-typed legacy attribute is dropped rather than re-emitted.
             guard !name.isEmpty, name != "data-table-name" else { continue }
             if let existing = cleaned.firstIndex(where: { $0.name == name }) {
                 cleaned[existing].value = attribute.value
@@ -1178,9 +1116,8 @@ final class TableViewModel {
         }
     }
 
-    /// The cells a formatting command applies to: every slot intersecting a
-    /// multi-cell drag selection (whole cells — a merge cannot be half-styled),
-    /// else the focused cell's text selection, whole cell if none.
+    /// The cells a formatting command applies to: every slot intersecting a drag
+    /// selection (whole cells — a merge cannot be half-styled), else the focused cell.
     private func formattingCells() -> [(row: Int, col: Int, range: NSRange)] {
         if let sel = cellSelection {
             let cells = table.placements().enumerated().flatMap { row, slots in
@@ -1221,8 +1158,7 @@ final class TableViewModel {
                 let mutable = NSMutableAttributedString(attributedString: c.content)
                 mutable.enumerateAttribute(.font, in: target.range) { value, subRange, _ in
                     let font = (value as? NSFont) ?? NSFont.systemFont(ofSize: NSFont.systemFontSize)
-                    // A single cell toggles per run (each run's own state
-                    // decides); a multi-cell selection applies one decision.
+                    // A single cell toggles per run; a multi-cell selection applies the one decision.
                     let flip = multi ? remove : manager.traits(of: font).contains(trait)
                     mutable.addAttribute(.font, value: transform(font, manager, flip), range: subRange)
                 }
@@ -1237,9 +1173,8 @@ final class TableViewModel {
         }
     }
 
-    /// Delete/⌘⌫ across a cell block empties every cell it touches — the
-    /// same whole-cell targets formatting uses — as one undoable step.
-    /// Returns true when a block consumed the chord.
+    /// Delete/⌘⌫ across a cell block empties every cell it touches — formatting's
+    /// whole-cell targets — as one undoable step. True when a block consumed the chord.
     @discardableResult
     func clearSelectedCells() -> Bool {
         let targets = formattingCells()
@@ -1263,8 +1198,7 @@ final class TableViewModel {
         return targets.allSatisfy { self.cell(row: $0.row, col: $0.col)?.isHeader ?? false }
     }
 
-    // Toolbar toggles read "on" only when every character of every targeted
-    // cell already carries the trait.
+    // Toolbar toggles read "on" only when every character of every targeted cell already carries the trait.
     private func selectionHasTrait(_ trait: NSFontTraitMask) -> Bool {
         let targets = formattingCells().filter { $0.range.length > 0 }
         guard !targets.isEmpty else { return false }
@@ -1346,41 +1280,29 @@ final class TableViewModel {
         loadDocument(doc)
     }
 
-    /// The tables the sidebar commands act on: the whole ⌘-selection,
-    /// falling back to the open table.
+    /// The tables the sidebar commands act on: the whole ⌘-selection, falling back to the open table.
     var selectedDocumentIDs: Set<UUID> {
         sidebarSelection.isEmpty ? Set(selectedDocumentID.map { [$0] } ?? []) : sidebarSelection
     }
 
-    // Rapid clicks would each pay a full document load, so every request
-    // restarts the timer and only the last request of a burst loads, 20 ms
-    // after the burst ends. 20 ms still defers to the next turn (the List
-    // setter fires mid-update) while keeping single clicks feeling instant.
+    // The coalescer's in-flight request; the burst's last request wins so rapid clicks don't each load.
     @ObservationIgnored private var pendingSidebarSelection: Set<UUID>?
     @ObservationIgnored private var sidebarCoalesceTimer: Timer?
     private static let sidebarCoalesceDelay: CFAbsoluteTime = 0.02
 
-    /// The sidebar list's entry point. Leading-edge coalescing: with no
-    /// window open the burst's first request loads on the very next turn
-    /// (never this one — the List setter fires mid-update), so a single
-    /// click pays no delay; later requests within the 20 ms window collapse
-    /// into one trailing apply, so a rapid burst still pays one load per
-    /// burst instead of one per click.
-    /// What the sidebar List's binding must read back: the in-flight request
-    /// while the coalescer window is open, the committed selection otherwise.
-    /// Reading plain sidebarSelection let List see the pre-click value for a
-    /// beat after every click; the snap-back reconciliation ate rapid clicks.
+    /// What the sidebar List's binding must read back: the in-flight request while the
+    /// coalescer is open, else committed — reading committed let List snap back mid-burst.
     var listSelectionSnapshot: Set<UUID> {
         let committed = sidebarSelection  // read unconditionally to keep Observation tracking it
         return pendingSidebarSelection ?? committed
     }
 
-    func requestSidebarSelection(_ new: Set<UUID>, src: String = "list") {
-        let leading = sidebarCoalesceTimer == nil
-        RTSwitchTrace.requestCount += 1  // TEMP
-        RTSwitchTrace.log("request src=\(src) leading=\(leading ? 1 : 0)")  // TEMP
+    /// The sidebar list's entry point. Leading-edge coalescing: the first request loads on
+    /// the very next turn (the List setter fires mid-update); a 20 ms window coalesces bursts.
+    func requestSidebarSelection(_ new: Set<UUID>) {
+        SidebarClickGuard.requestCount += 1
         pendingSidebarSelection = new
-        if leading {
+        if sidebarCoalesceTimer == nil {
             Task { @MainActor [weak self] in
                 guard let self, let selection = self.pendingSidebarSelection else { return }
                 self.pendingSidebarSelection = nil
@@ -1404,9 +1326,6 @@ final class TableViewModel {
     /// The sidebar list's selection: plain click replaces, ⌘-click toggles.
     /// The editor follows the last-clicked table; clearing keeps the open one.
     func applySidebarSelection(_ new: Set<UUID>) {
-        RTSwitchTrace.gen += 1  // TEMP
-        let tApply = RTSwitchTrace.now  // TEMP
-        RTSwitchTrace.log("apply")  // TEMP
         let old = sidebarSelection
         guard new != old else { return }
         sidebarSelection = new
@@ -1420,11 +1339,9 @@ final class TableViewModel {
             primary = new.isEmpty ? nil : documents.first { new.contains($0.id) }?.id
         }
         if let primary, primary != selectedDocumentID { selectDocument(primary) }
-        RTSwitchTrace.log("selectDone dt=\(String(format: "%.1f", RTSwitchTrace.now - tApply))ms")  // TEMP
     }
 
-    /// Inline sidebar rename: keystrokes update the in-memory name only; the
-    /// file follows when editing commits (commitInlineRename).
+    /// Inline sidebar rename: keystrokes update the in-memory name; the file follows at commitInlineRename.
     func renameDocument(_ id: UUID, to newName: String) {
         guard let idx = documents.firstIndex(where: { $0.id == id }) else { return }
         let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1435,13 +1352,11 @@ final class TableViewModel {
         scheduleAutosave()
     }
 
-    /// Commits an inline sidebar rename: the file is moved to the new name.
     func commitInlineRename(_ id: UUID) {
         renameFileToMatchName(id)
     }
 
-    /// Moves the document's file so its stem is the sanitized name. No-op when
-    /// unsaved (the first save derives the name) or when it already matches.
+    /// Moves the file so its stem is the sanitized name; no-op when unsaved or already matching.
     private func renameFileToMatchName(_ id: UUID) {
         guard let idx = documents.firstIndex(where: { $0.id == id }),
               let oldURL = documents[idx].fileURL else { return }
@@ -1457,13 +1372,11 @@ final class TableViewModel {
         guard newURL != oldURL,
               (try? FileManager.default.moveItem(at: oldURL, to: newURL)) != nil else { return }
         documents[idx].fileURL = newURL
-        // Persist now: a rename with no further edits must not wait for the
-        // next autosave.
+        // Persist now: a rename with no further edits must not wait for the next autosave.
         saveAllDocuments()
     }
 
-    /// Opens the rename sheet pre-filled with the title; the filename is shown
-    /// (derived from the title) but not editable. Nil means the selection.
+    /// Opens the rename sheet pre-filled with the title; the derived filename shows but is not editable.
     func beginRename(_ id: UUID? = nil) {
         guard let id = id ?? selectedDocumentID, let doc = document(id: id) else { return }
         renamingID = id
@@ -1481,8 +1394,7 @@ final class TableViewModel {
         applyRename(id: id, title: title)
     }
 
-    /// Sets the title and moves the file to the sanitized name, undoable as
-    /// one step. The filename is always derived from the title.
+    /// Sets the title and moves the file to the sanitized name, undoable as one step.
     private func applyRename(id: UUID, title: String) {
         guard let idx = documents.firstIndex(where: { $0.id == id }) else { return }
         closeTypingGroup()
@@ -1508,8 +1420,7 @@ final class TableViewModel {
                                redoDocs: afterDocuments, redoSelection: afterSelection)
     }
 
-    /// Like registerDocumentUndo, plus the file itself travels with the
-    /// document snapshot in both directions.
+    /// Like registerDocumentUndo, plus the file itself travels with the document snapshot in both directions.
     private func registerFileRenameUndo(undoFile: URL?, redoFile: URL?, name: String,
                                         undoDocs: [TableDocument], undoSelection: UUID?,
                                         redoDocs: [TableDocument], redoSelection: UUID?) {
@@ -1530,13 +1441,7 @@ final class TableViewModel {
         try? FileManager.default.moveItem(at: from, to: to)
     }
 
-    func duplicateDocument(_ id: UUID) {
-        duplicateDocuments([id])
-    }
-
-    /// Each copy lands directly below its source; the batch is one undo step
-    /// (per-ID loads would clear the stack and orphan earlier steps) and the
-    /// copies become the selection.
+    /// Each copy lands below its source; the batch is one undo step (per-ID loads clear the stack).
     func duplicateDocuments(_ ids: Set<UUID>) {
         let ordered = documents.filter { ids.contains($0.id) }
         guard !ordered.isEmpty else { return }
@@ -1580,11 +1485,8 @@ final class TableViewModel {
         return candidate
     }
 
-    /// Deleting a table is undoable: the whole document list plus the
-    /// selection are snapshotted and restored as one step. Batches pass
-    /// registerUndo: false and register a single combined step themselves —
-    /// the editor fallback's loadDocument clears the stack mid-batch, which
-    /// would orphan the earlier steps.
+    /// Deleting a table is undoable: the document list and selection are snapshotted and
+    /// restored as one step. Batches pass registerUndo: false — loadDocument clears the stack.
     func deleteDocument(_ id: UUID, registerUndo: Bool = true) {
         guard let idx = documents.firstIndex(where: { $0.id == id }) else { return }
         closeTypingGroup()
@@ -1598,8 +1500,7 @@ final class TableViewModel {
         modifiedDates.removeValue(forKey: id)
         sidebarSelection.remove(id)
         scheduleAutosave()
-        // The file goes with it; an undo restores the table and the next
-        // autosave pass writes the file back.
+        // The file goes with it; an undo restores the table and the next autosave pass writes the file back.
         if let removedFileURL {
             try? FileManager.default.removeItem(at: removedFileURL)
         }
@@ -1608,8 +1509,7 @@ final class TableViewModel {
             // empty state instead of auto-recreating a document.
             selectedDocumentID = nil
             focusedCell = nil
-            // The editor falls to the next ⌘-selected table, not just the
-            // first document.
+            // The editor falls to the next ⌘-selected table, not just the first document.
             let next = documents.first { sidebarSelection.contains($0.id) } ?? documents.first
             if let next {
                 loadDocument(next)
@@ -1622,8 +1522,7 @@ final class TableViewModel {
         guard registerUndo else { return }
         let afterDocuments = deepCopied(documents)
         let afterSelection = selectedDocumentID
-        // registerDocumentUndo registers the entry AND restores inside its
-        // handler on undo, so no extra wrapper here.
+        // registerDocumentUndo restores inside its handler on undo, so no extra wrapper here.
         registerDocumentUndo(name: "Delete \(removedName)",
                              undoTo: beforeDocuments, undoSelection: beforeSelection,
                              redoTo: afterDocuments, redoSelection: afterSelection)
@@ -1645,9 +1544,8 @@ final class TableViewModel {
 
     private func restoreDocuments(_ docs: [TableDocument], selection: UUID?) {
         documents = deepCopied(docs)
-        // The restored tables' files may not exist on disk (an undo of a
-        // delete re-creates the tables, not the files), so the cached mtimes
-        // are stale until the next autosave pass.
+        // An undo of a delete re-creates the tables, not the files, so the restored
+        // tables' cached mtimes are stale until the next autosave pass.
         modifiedDates.removeAll()
         if let sel = selection, let doc = documents.first(where: { $0.id == sel }) {
             loadDocument(doc)
@@ -1656,7 +1554,6 @@ final class TableViewModel {
             loadDocument(first)
             sidebarSelection = [first.id]
         } else {
-            // Undo restored the zero-tables state.
             selectedDocumentID = nil
             focusedCell = nil
             sidebarSelection = []
@@ -1672,9 +1569,8 @@ final class TableViewModel {
         deleteDocuments(selectedDocumentIDs)
     }
 
-    /// One undo step for the whole batch; the captured IDs stay valid as the
-    /// list shrinks, and the combined registration lands after the editor
-    /// fallback's loadDocument has cleared the stack.
+    /// One undo step for the whole batch; the captured IDs stay valid as the list
+    /// shrinks, and the combined registration lands after loadDocument has cleared the stack.
     func deleteDocuments(_ ids: Set<UUID>) {
         let ordered = documents.filter { ids.contains($0.id) }
         guard !ordered.isEmpty else { return }
@@ -1699,7 +1595,6 @@ final class TableViewModel {
 
     // MARK: - Templates
 
-    /// Menu and manager order: alphabetical, like the files they are stored as.
     var sortedTemplates: [TableDocument] {
         templates.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
     }
@@ -1730,8 +1625,7 @@ final class TableViewModel {
         templateNameText = ""
     }
 
-    /// A fresh document carrying the template's markup, named after the
-    /// template and numbered if a table already owns that name.
+    /// A fresh document with the template's markup, named after it, numbered if the name is taken.
     func newTable(fromTemplate template: TableDocument) {
         flushToDocument()
         // Fresh id: the new table is its own document, not the template.
@@ -1744,8 +1638,7 @@ final class TableViewModel {
         sidebarSelection = [doc.id]
     }
 
-    /// Renaming moves the file. The old one goes only after the new write
-    /// succeeds, so a failed write cannot destroy the template.
+    /// Renaming moves the file; the old one goes only after the new write succeeds.
     func renameTemplate(_ id: UUID, to newName: String) {
         guard let idx = templates.firstIndex(where: { $0.id == id }) else { return }
         let typed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1768,7 +1661,6 @@ final class TableViewModel {
         templates.remove(at: idx)
     }
 
-    /// "Base", then "Base 2", "Base 3"… until the name is free.
     private func uniqueName(_ base: String, avoiding taken: Set<String>) -> String {
         var candidate = base
         var suffix = 2
@@ -1788,13 +1680,11 @@ final class TableViewModel {
         focusedCell = GridCell(row: 0, column: 0)
         cellSelection = nil
         ensureSizing()
-        // Fresh tables start at the default height; grow to fit their text.
-        // Revisits carry exact heights (grown once, plus manual resizes).
-        // (restore() deliberately does NOT do this: snapshot heights are exact.)
+        // Fresh tables grow from the default height to fit their text; revisits
+        // carry exact heights. restore() deliberately skips this: snapshots are exact.
         if document.rowHeights.isEmpty { refreshRowHeights() }
         regenerateHTML()
-        // A file that loaded with markup complaints keeps showing them until
-        // an edit normalizes it; regenerateHTML just cleared the live copy.
+        // A file that loaded with complaints keeps showing them; regenerateHTML just cleared the live copy.
         markupDiagnostics = document.table.diagnostics
         contentRevision += 1
         // Undo history is per table; the old stack would restore stale rows.
@@ -1802,8 +1692,7 @@ final class TableViewModel {
         if !undoManager.isUndoing && !undoManager.isRedoing {
             undoManager.removeAllActions()
         }
-        // A first visit grows row heights (unflushed until the next edit); the
-        // old @Published sink saved after every load, so keep that parity.
+        // A first visit grows row heights; the load-time save persists that growth.
         scheduleAutosave()
     }
 
@@ -1830,8 +1719,7 @@ final class TableViewModel {
 
     private static let cellTextInset: CGFloat = 3
 
-    // Grow-only: a manually shrunk row stays shrunk, so auto-sizing never
-    // fights the resize handles.
+    // Grow-only: a manually shrunk row stays shrunk, so auto-sizing never fights the resize handles.
     func growRowIfNeeded(_ row: Int) {
         guard row >= 0, row < rowHeights.count, row < table.rows.count else { return }
         var needed = TableViewModel.defaultRowHeight
@@ -1858,8 +1746,7 @@ final class TableViewModel {
         for row in table.rows.indices { growRowIfNeeded(row) }
     }
 
-    // Mirrors the cell text views' metrics (3pt insets, 5pt line-fragment
-    // padding) so the layout engine measures the same box the text lays out in.
+    // Mirrors the cell text views' metrics (3pt inset, 5pt fragment padding) to measure the same box.
     private static func requiredHeight(for content: NSAttributedString, width: CGFloat) -> CGFloat {
         guard content.length > 0 else { return defaultRowHeight }
         let storage = NSTextStorage(attributedString: content)
@@ -1898,12 +1785,10 @@ final class TableViewModel {
     @ObservationIgnored private var autosaveTimer: Timer?
     // Unchanged HTML is never rewritten, so the debounce pass costs no disk churn.
     @ObservationIgnored private var savedHTML: [UUID: String] = [:]
-    // The file's mtime stands in for "last edited"; cached so a sidebar row
-    // never does a synchronous file stat per render (a synced library folder
-    // makes that a network round trip per row).
+    // The file's mtime stands in for "last edited"; cached so a sidebar row never
+    // does a synchronous stat (a synced library folder makes that a network round trip).
     @ObservationIgnored private var modifiedDates: [UUID: Date] = [:]
 
-    /// The file's mtime, cached after the first read. Nil when unsaved.
     func modifiedDate(for id: UUID) -> Date? {
         if let cached = modifiedDates[id] { return cached }
         guard let url = document(id: id)?.fileURL,
@@ -1927,11 +1812,8 @@ final class TableViewModel {
         saveAllDocuments()
     }
 
-    // The filename always mirrors the name: the first save derives it, and a
-    // rename (inline or dialog) has already moved the file to the new stem.
+    // The filename always mirrors the name: the first save derives it; renames already moved the file.
     func saveAllDocuments() {
-        let tSave = RTSwitchTrace.now  // TEMP
-        var rtWrites = 0  // TEMP
         autosaveTimer?.invalidate()
         autosaveTimer = nil
         let fm = FileManager.default
@@ -1950,13 +1832,11 @@ final class TableViewModel {
                 continue
             }
             savedHTML[documents[idx].id] = html
-            rtWrites += 1  // TEMP
             documents[idx].fileURL = url
             if let mtime = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate {
                 modifiedDates[documents[idx].id] = mtime
             }
         }
-        RTSwitchTrace.log("save dt=\(String(format: "%.1f", RTSwitchTrace.now - tSave))ms writes=\(rtWrites)")  // TEMP
     }
 
     private static func uniqueFileURL(for name: String, taken: inout Set<String>) -> URL {
@@ -1971,8 +1851,7 @@ final class TableViewModel {
         return candidate
     }
 
-    // Letters, digits, spaces and " -_.()" survive; the rest become '-' and
-    // runs collapse.
+    // Letters, digits, spaces and " -_.()" survive; the rest become '-' and runs collapse.
     static func sanitizedFileName(_ name: String) -> String {
         let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: " -_.()"))
         let mapped = name.unicodeScalars.map { allowed.contains($0) ? $0 : UnicodeScalar("-") }
@@ -1986,13 +1865,10 @@ final class TableViewModel {
 
     // MARK: - Title store migration
 
-    /// The old app kept display titles in a UserDefaults store keyed by file
-    /// path, which a cold launch could wipe before the library grant resolved.
-    /// The name is now the source of truth and the filename always mirrors it,
-    /// so this one-time pass folds every stored title into its filename and
-    /// drops the store.
+    /// The old app kept display titles in a UserDefaults store keyed by file path, which a
+    /// cold launch could wipe before the grant resolved; this pass folds titles into filenames.
     private static let titlesByPathKey = "TableTitlesByPath"
-    // Keyed by the library path so a headless probe (its own directory) can't
+    // Keyed by the library path so a test run (its own directory) can't
     // mark the user's real library as migrated.
     private static var titlesMigratedKey: String {
         "TitlesMigratedToFileName-" + canonicalPath(saveDirectory)
@@ -2004,8 +1880,7 @@ final class TableViewModel {
         url.resolvingSymlinksInPath().path
     }
 
-    /// Rewrite store keys when the library root moves so titles survive the
-    /// move (only meaningful before the migration has consumed the store).
+    /// Re-key store entries when the library root moves so titles survive (pre-migration only).
     static func rekeyTitles(from oldRoot: URL, to newRoot: URL) {
         let o = canonicalPath(oldRoot), n = canonicalPath(newRoot)
         guard o != n,
@@ -2018,10 +1893,7 @@ final class TableViewModel {
         UserDefaults.standard.set(rebuilt, forKey: titlesByPathKey)
     }
 
-    /// Run once: rename each table file so its stem is the display name (from
-    /// the old store, then a legacy in-file name, then the stem), then drop the
-    /// store. Skips if the library can't be listed, so the store is never
-    /// destroyed without being consumed.
+    /// Run once: rename each table file to its display name (store, legacy name, stem), then drop the store.
     private static func migrateTitleStoreIfNeeded() {
         let defaults = UserDefaults.standard
         guard !defaults.bool(forKey: titlesMigratedKey) else { return }
@@ -2083,8 +1955,7 @@ final class TableViewModel {
 
     // MARK: - Cell copy / paste
 
-    /// The selected rectangle as its own Table: slot spans clipped to the
-    /// selection window, rows padded rectangular.
+    /// The selected rectangle as its own Table: spans clipped to the window, rows padded rectangular.
     private func subtable(of sel: VisualCellRange) -> Table {
         var rows: [[TableCell]] = []
         let placements = table.placements()
@@ -2107,8 +1978,7 @@ final class TableViewModel {
         return sub
     }
 
-    /// ⌘C with a cell range selected copies the cells as a standalone HTML
-    /// table (plus TSV) instead of the focused cell's text. True = handled.
+    /// ⌘C with a cell range copies the cells as a standalone HTML table (plus TSV). True = handled.
     func copySelectedCells() -> Bool {
         guard let sel = cellSelection else { return false }
         let sub = subtable(of: sel)
@@ -2121,10 +1991,8 @@ final class TableViewModel {
         return true
     }
 
-    /// ⌘V inside a cell: when the clipboard holds a real HTML table (what
-    /// copySelectedCells writes), promote it to its own document instead of
-    /// dumping every cell's text into the focused cell. Plain text and links
-    /// still paste into the cell. True = handled.
+    /// ⌘V inside a cell: a real HTML table on the clipboard (what copySelectedCells writes)
+    /// is promoted to its own document, not flattened into the cell. Plain text still pastes.
     func pasteTableFromPasteboardIfTable() -> Bool {
         guard let html = NSPasteboard.general.string(forType: .html),
               html.range(of: "<table", options: .caseInsensitive) != nil else { return false }
@@ -2132,8 +2000,7 @@ final class TableViewModel {
         return true
     }
 
-    /// Creates a new table from the pasteboard — HTML table or tab/newline
-    /// text — as one undoable step, the way Duplicate Table works.
+    /// New table from the pasteboard (HTML table or tab/newline text), one undoable step.
     func pasteAsNewTable() {
         let pasteboard = NSPasteboard.general
         guard let source = pasteboard.string(forType: .html) ?? pasteboard.string(forType: .string),
@@ -2166,8 +2033,7 @@ final class TableViewModel {
 
     // MARK: - CSV import/export
 
-    /// File ▸ Import ▸ CSV…: pick a file, parse it, and load the result as a
-    /// new document in one undo step (the pasteAsNewTable pattern).
+    /// File ▸ Import ▸ CSV…: parse the file and load it as a new document in one undo step.
     func importCSV() {
         Self.csvImporter.chooseCSVFile(prompt: "Import", into: nil) { [weak self] url in
             guard let self, let url else { return }
@@ -2186,8 +2052,7 @@ final class TableViewModel {
         newTable(fromCSVGrid: grid, name: url.deletingPathExtension().lastPathComponent)
     }
 
-    /// Builds a body-only table from a parsed grid (the first row is plain
-    /// cells, not a header) and loads it as a new undoable document.
+    /// Body-only table from a parsed grid (first row plain, not a header), loaded as a new undoable doc.
     func newTable(fromCSVGrid grid: [[String]], name: String) {
         closeTypingGroup()
         flushToDocument()
@@ -2209,8 +2074,7 @@ final class TableViewModel {
                              redoTo: deepCopied(documents), redoSelection: selectedDocumentID)
     }
 
-    /// File ▸ Export ▸ CSV…: pick a destination and write the whole table,
-    /// merged cells flattened to their top-left slot.
+    /// File ▸ Export ▸ CSV…: write the whole table, merged cells flattened to their top-left slot.
     func exportCSV() {
         guard selectedDocumentID != nil else { return }
         let suggested = TableViewModel.sanitizedFileName(table.name) + ".csv"
@@ -2227,8 +2091,7 @@ final class TableViewModel {
         try? CSV.encode(flattenTable()).write(to: url, atomically: true, encoding: .utf8)
     }
 
-    /// The whole table as a rectangular string grid: each cell's text lands in
-    /// its top-left visual slot and merge-covered slots stay blank.
+    /// The table as a string grid: text lands in each cell's top-left slot, covered slots stay blank.
     func flattenTable() -> [[String]] {
         let cols = max(table.columnCount, 1)
         let slots = table.placements()
@@ -2244,8 +2107,7 @@ final class TableViewModel {
 
     // MARK: - Markdown import/export
 
-    /// File ▸ Import ▸ Markdown…: pick a file and load each pipe table in it
-    /// as its own document in one undo step.
+    /// File ▸ Import ▸ Markdown…: load each pipe table as its own document in one undo step.
     func importMarkdown() {
         Self.mdImporter.chooseMarkdownFile(prompt: "Import", into: nil) { [weak self] url in
             guard let self, let url else { return }
@@ -2262,9 +2124,8 @@ final class TableViewModel {
         newTables(fromMarkdown: found, nameFallback: url.deletingPathExtension().lastPathComponent)
     }
 
-    /// One document per pipe table, titled by the nearest preceding heading
-    /// (file stem when none); the first is loaded and the whole file is one
-    /// undo step.
+    /// One document per pipe table, titled by the nearest preceding heading (file
+    /// stem when none); the first is loaded and the whole file is one undo step.
     func newTables(fromMarkdown found: [MarkdownTable.Found], nameFallback: String) {
         closeTypingGroup()
         flushToDocument()
@@ -2297,9 +2158,7 @@ final class TableViewModel {
                              redoTo: deepCopied(documents), redoSelection: selectedDocumentID)
     }
 
-    /// File ▸ Export ▸ Markdown…: a headless table is refused in the prompt
-    /// sheet, losses are disclosed there, and a clean table goes straight to
-    /// the save panel.
+    /// File ▸ Export ▸ Markdown…: headless tables are refused and losses disclosed in the prompt sheet.
     func exportMarkdown() {
         guard selectedDocumentID != nil else { return }
         guard table.rows.contains(where: { $0.section == .head }) else {
@@ -2343,15 +2202,12 @@ final class TableViewModel {
         try? markdown.write(to: url, atomically: true, encoding: .utf8)
     }
 
-    /// True when a text view owns the caret. Field editors are NSTextViews, so
-    /// cells, the source pane, renames and the link sheet are one check.
+    /// True when a text view owns the caret; field editors are NSTextViews, so all inputs are one check.
     static func caretInTextView(_ window: NSWindow?) -> Bool {
         window?.firstResponder is NSTextView
     }
 
-    /// ⌘⌫ context: a cell block clears its cells; with no caret it deletes
-    /// the table; otherwise the chord goes back to the text as the paragraph
-    /// delete it names (a disabled menu item still swallows it).
+    /// ⌘⌫: a cell block clears; no caret deletes the table; else the text gets its paragraph delete.
     func deleteTableChordPressed() {
         if clearSelectedCells() { return }
         if Self.caretInTextView(NSApp.keyWindow) {
@@ -2361,13 +2217,11 @@ final class TableViewModel {
         }
     }
 
-    // Templates sit in a subfolder: contentsOfDirectory is not recursive, so
-    // loadStoredDocuments can never list one as a table.
+    // Templates sit in a subfolder: contentsOfDirectory isn't recursive, so loadStoredDocuments can't list one.
     static var templateDirectory: URL {
         saveDirectory.appendingPathComponent("Templates", isDirectory: true)
     }
 
-    /// Writes one template and returns where it landed, or nil on failure.
     private static func writeTemplate(_ template: TableDocument) -> URL? {
         try? FileManager.default.createDirectory(at: templateDirectory, withIntermediateDirectories: true)
         let url = templateURL(for: template.name, excluding: template.fileURL)
@@ -2380,8 +2234,7 @@ final class TableViewModel {
         return url
     }
 
-    // Different names can sanitize to one file ("A/B" and "A-B"), so the
-    // filesystem gets the suffix vote; a template's own file is never taken.
+    // Different names can sanitize to one file ("A/B", "A-B"), so the filesystem gets the suffix vote.
     private static func templateURL(for name: String, excluding own: URL?) -> URL {
         let base = sanitizedFileName(name)
         var candidate = templateDirectory.appendingPathComponent("\(base).html")
@@ -2410,8 +2263,7 @@ final class TableViewModel {
             }
     }
 
-    // Headless harnesses set this: NSHomeDirectory() ignores $HOME for a bare
-    // executable, so an env redirect cannot sandbox the library.
+    // Test harnesses set this: NSHomeDirectory() ignores $HOME for a bare executable.
     static var saveDirectoryOverride: URL?
 
     static var saveDirectory: URL {
@@ -2419,16 +2271,13 @@ final class TableViewModel {
         return LibraryLocation.directory
     }
 
-    // CSV file picking behind injectable seams so a headless probe scripts the
-    // chosen URL instead of raising a panel; the access pair brackets the
-    // one-time security-scoped read or write.
+    // CSV picking behind injectable seams so tests script the URL; the access pair brackets the read/write.
     static var csvImporter: CSVFileImporting = SystemCSVImporter()
     static var csvExporter: CSVFileExporting = SystemCSVExporter()
     static var csvBeginAccess: (URL) -> Bool = { $0.startAccessingSecurityScopedResource() }
     static var csvEndAccess: (URL) -> Void = { $0.stopAccessingSecurityScopedResource() }
 
-    // Markdown file picking behind the same injectable seams as CSV; the
-    // access pair is shared since it is generic security-scoped access.
+    // Markdown picking behind the same injectable seams as CSV; the access pair is shared.
     static var mdImporter: MarkdownFileImporting = SystemMarkdownImporter()
     static var mdExporter: MarkdownFileExporting = SystemMarkdownExporter()
 }

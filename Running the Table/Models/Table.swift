@@ -18,9 +18,8 @@ struct Table {
     /// boilerplate, style blocks, even extra tables survive WYSIWYG edits.
     var sourcePrefix: String = ""
     var sourceSuffix: String = ""
-    /// Accessibility emission toggles: scope on header cells and SR-only
-    /// text on empty merged cells. Only markup the grid generates carries
-    /// them; verbatim attributes from a parse always ride through.
+    /// Accessibility emission toggles: scope on header cells and SR-only text on empty
+    /// merged cells. Only generated markup carries them; verbatim parse attributes ride through.
     var accessibilityScope: Bool = false
     var accessibilitySRText: Bool = false
     /// Parse notes for markup that could not be honored; transient (never
@@ -43,8 +42,7 @@ struct Table {
         Table(rows: [[TableCell()]])
     }
 
-    /// Visual column count: cells can cover several columns each, and a
-    /// rowspan lets later rows cover fewer.
+    /// Visual column count: cells can cover several columns each, and a rowspan lets later rows cover fewer.
     var columnCount: Int {
         rows.map { row in row.reduce(0) { $0 + Self.clampedSpan($1.colspan) } }.max() ?? 0
     }
@@ -57,9 +55,8 @@ struct Table {
         min(max(value, TableCell.minRowspan), TableCell.maxRowspan)
     }
 
-    /// One cell's visual footprint: where it starts and how many columns and
-    /// rows it covers. Rowskip-aware: startCol accounts for columns already
-    /// claimed by rowspans from above.
+    /// One cell's visual footprint: where it starts and how many columns and rows it
+    /// covers. Rowskip-aware: startCol accounts for columns claimed by rowspans above.
     struct CellPlacement {
         let cellIndex: Int
         let startCol: Int
@@ -67,10 +64,8 @@ struct Table {
         let rowSpan: Int
     }
 
-    /// Top-down grid layout: each row's own cells with their visual
-    /// footprints, plus a map of columns a row cannot use because a cell
-    /// originating in a row above still covers them (occupancy() also marks
-    /// each cell's own footprint, so it can't serve as that map).
+    /// Top-down grid layout: each row's own cells with their visual footprints, plus a
+    /// map of columns a row cannot use because a cell originating above still covers them.
     private func gridScan() -> (slots: [[CellPlacement]], reserved: [[Bool]]) {
         let cols = max(columnCount, 1)
         var reserved = Array(repeating: Array(repeating: false, count: cols), count: rows.count)
@@ -94,12 +89,10 @@ struct Table {
         return (out, reserved)
     }
 
-    /// Each row's own cells with their visual footprints, in array order.
     func placements() -> [[CellPlacement]] { gridScan().slots }
 
     /// Content-independent layout key: equal fingerprints imply equal
-    /// placements(), which is what lets the view model cache the scan and the
-    /// move-gate answers instead of re-running a full gridScan per query.
+    /// placements(), letting the view model cache the scan and move gates.
     var structureFingerprint: Int {
         var hash = rows.count &* 31 &+ columnCount
         for row in rows {
@@ -111,8 +104,7 @@ struct Table {
         return hash
     }
 
-    /// The cell visually covering grid position (row, col), which may
-    /// originate in a row above via rowspan.
+    /// The cell visually covering grid position (row, col), which may originate in a row above via rowspan.
     func cellCovering(row: Int, col: Int) -> (row: Int, cell: Int)? {
         let slots = placements()
         guard row >= 0, row < slots.count else { return nil }
@@ -146,9 +138,8 @@ struct Table {
         return false
     }
 
-    /// True when a rowspan starts on one side of the row band and ends on
-    /// the other: shifting rows wholly inside the band would tear it apart,
-    /// while merges fully inside travel intact.
+    /// True when a rowspan starts on one side of the row band and ends on the other:
+    /// shifting rows wholly inside the band would tear it; merges inside travel intact.
     func rowspanSplitsBand(_ lo: Int, _ hi: Int) -> Bool {
         for (origin, slots) in placements().enumerated() {
             for p in slots where p.rowSpan > 1 {
@@ -192,9 +183,8 @@ struct Table {
         return taken
     }
 
-    /// Pad/trim rows so every row visually spans the full grid; call after
-    /// every add/remove row-or-column operation. Cells blocked in by rowspans
-    /// count toward a row's coverage, so those rows need fewer of their own.
+    /// Pad/trim rows so every row visually spans the full grid; call after every
+    /// row-or-column add/remove. Cells blocked in by rowspans count toward coverage.
     mutating func normalize() {
         if rows.isEmpty { rows = [TableRow(cells: [TableCell()])] }
         let target = columnCount
@@ -207,10 +197,8 @@ struct Table {
                 taken = occupancy()
                 reserved = gridScan().reserved
             }
-            // Truncating can shrink a rowspan's blocked columns below, which
-            // the top-down pass repads when it reaches those rows. A row can
-            // also outlive its cells' columns: an inserted row of full width
-            // under a rowspan has one cell too many to place.
+            // Truncating can shrink a rowspan's blocked columns below; the top-down pass
+            // repads those rows. And an inserted full-width row under a rowspan has one cell too many.
             while !rows[row].cells.isEmpty,
                   filled(ofRow: row, taken: taken, target: target) > target
                       || unplacedCellCount(ofRow: row, reserved: reserved) > 0 {
@@ -262,9 +250,8 @@ struct Table {
 }
 
 extension Table {
-    /// A table loaded from parsed markup, pass-through fields and all.
-    /// Callers replacing a live table pass its id: document identity is
-    /// derived from table.id, so a fresh UUID would orphan the document.
+    /// A table loaded from parsed markup, pass-through fields and all. Callers
+    /// replacing a live table pass its id: document identity derives from table.id.
     static func loaded(from parsed: ParsedTable, name: String, id: UUID = UUID()) -> Table {
         var table = Table(rows: parsed.rows, name: name, id: id)
         table.caption = parsed.caption

@@ -1,16 +1,15 @@
 import AppKit
 import SwiftUI
 
-/// The app's whole menu-bar additions, in one Commands value so the
-/// menu-reading probes can compile the identical commands into a test app.
+/// The app's whole menu-bar additions, in one Commands value so menu-reading
+/// tests can compile the identical commands into a test app.
 struct RunningTheTableCommands: Commands {
-    // Plain: TableViewModel is @Observable, and Commands cannot wrap one in
-    // @ObservedObject. Menu enablement re-validates when the items' views'
-    // observed reads change (verified via toolbarprobe + menudump).
+    // Plain: all three models are @Observable, and Commands cannot wrap one in
+    // @ObservedObject. Menu enablement re-validates on the items' observed reads.
     var viewModel: TableViewModel
-    // Defaulted so menu probes compile the identical commands unchanged.
-    @ObservedObject var updater: UpdateChecker = UpdateChecker()
-    @ObservedObject var library: LibraryCoordinator = LibraryCoordinator()
+    // Defaulted so menu tests compile the identical commands unchanged.
+    var updater: UpdateChecker = UpdateChecker()
+    var library: LibraryCoordinator = LibraryCoordinator()
 
     var body: some Commands {
         // The stock About item, re-issued so the panel gets our credits block.
@@ -29,16 +28,14 @@ struct RunningTheTableCommands: Commands {
                 .keyboardShortcut(",", modifiers: .command)
         }
 
-        // ⌘N lands above the stock New Window (remapped to ⌥⌘N in App's
-        // init); a replaced .newItem group would delete New Window, and an
-        // id-carrying WindowGroup never opens its launch window.
+        // ⌘N lands above the stock New Window (remapped to ⌥⌘N in App's init); a
+        // replaced .newItem group would delete New Window.
         CommandGroup(before: .newItem) {
             Button("New Table") { viewModel.newTable() }
                 .keyboardShortcut("n")
         }
 
-        // The submenu needs a disabled placeholder while no template
-        // exists: .disabled() on a Menu is ignored.
+        // A disabled placeholder keeps the empty submenu from vanishing (.disabled() on Menu is ignored).
         CommandGroup(after: .newItem) {
             Button("Rename Table…") { viewModel.beginRename() }
                 .keyboardShortcut("r")
@@ -94,8 +91,8 @@ struct RunningTheTableCommands: Commands {
             .disabled(!viewModel.undoManager.canRedo)
         }
 
-        // Chord family: the arrow names the edge, and ⌥⌘ keeps it clear of
-        // NSTextView's ⌥/⌘ caret motions. CommandMenu has no placement knob.
+        // Chord family: the arrow names the edge, and ⌥⌘ keeps it clear of NSTextView's
+        // ⌥/⌘ caret motions. CommandMenu has no placement knob.
         CommandMenu("Insert") {
             Button("Add Row Above") { insertRow(after: false) }
                 .keyboardShortcut(.upArrow, modifiers: [.command, .option])
@@ -113,8 +110,7 @@ struct RunningTheTableCommands: Commands {
                 .keyboardShortcut(.rightArrow, modifiers: [.command, .option])
                 .disabled(viewModel.focusedCell == nil)
 
-            // The remove chords moved off the toolbar so they are printed
-            // somewhere; tr+/td+ keep ⌘⌥R and ⌘⌥C.
+            // The remove chords moved off the toolbar so they are printed; tr+/td+ keep ⌘⌥R and ⌘⌥C.
             Divider()
 
             Button("Remove Row") { viewModel.removeRow() }
@@ -244,9 +240,8 @@ struct RunningTheTableCommands: Commands {
             }
             .disabled(!viewModel.canDuplicateFocusedColumn)
 
-            // Greyed while a text view owns the caret — except during a cell
-            // block, where the chord must reach the action to clear the block
-            // (a disabled item would swallow it).
+            // Greyed while a text view owns the caret — except during a cell block, where
+            // the chord must reach the action to clear the block (a disabled item would swallow it).
             Button(viewModel.cellSelection == nil ? "Delete Table" : "Delete Cells") {
                 viewModel.deleteTableChordPressed()
             }
@@ -258,8 +253,7 @@ struct RunningTheTableCommands: Commands {
 
             Button("Manage Templates…") { viewModel.showTemplateManager = true }
 
-            // ⌘1 mirrors Excel's Format Cells: a dialog that formats the
-            // current table.
+            // ⌘1 mirrors Excel's Format Cells: a dialog that formats the current table.
             Button("Table Attributes…") { viewModel.beginTableAttributes() }
                 .keyboardShortcut("1")
                 .disabled(viewModel.selectedDocumentID == nil)
@@ -278,7 +272,7 @@ struct RunningTheTableCommands: Commands {
     }
 }
 
-/// Credits block for the standard About panel, kept separate so probes can
+/// Credits block for the standard About panel, kept separate so tests can
 /// assert its payload without ordering the panel on screen.
 enum AboutPanel {
     static let githubURLString = "https://github.com/thomsirveaux01/running-the-table"

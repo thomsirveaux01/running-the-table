@@ -2,7 +2,7 @@ import AppKit
 import SwiftUI
 
 struct LibrarySettingsView: View {
-    @ObservedObject var library: LibraryCoordinator
+    var library: LibraryCoordinator
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {

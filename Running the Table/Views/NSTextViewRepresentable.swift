@@ -14,28 +14,21 @@ private let cellCommandTitles: [(CellCommand, String)] = [
     (.duplicateRow, "Duplicate Row"), (.duplicateColumn, "Duplicate Column"),
 ]
 
-// Drops AppKit's system items from a text view's context menu: the
-// suggestion cluster (Siri/Look Up/Translate), the Font submenu, AutoFill, and
-// Services. Selectors measured offscreen (tools/viewmenu); Font's identifier
-// is nib-generated. Called from menu(for:) and again from the display-cycle
-// hooks below, because AppKit injects AutoFill/Services after menu(for:)
-// returns.
+// Drops AppKit's system items from a text view's context menu: the suggestion cluster,
+// the Font submenu (nib-generated identifier, so matched by action), AutoFill, and
+// Services. Called from menu(for:) and the display-cycle hooks: AppKit injects those after menu(for:).
 func pruneSystemItems(from menu: NSMenu) {
-    // "_rvMenuItemAction" is the remote-view item Siri, Look Up, and
-    // Translate are rendered through.
+    // "_rvMenuItemAction" is the remote-view item Siri, Look Up, and Translate are rendered through.
     let suggestions: Set<String> = ["_rvMenuItemAction", "_searchWithGoogleFromMenu:"]
-    let fontPanel = NSSelectorFromString("orderFrontFontPanel:")
+    let fontPanel = #selector(NSFontManager.orderFrontFontPanel(_:))
     let servicesAction = NSSelectorFromString("orderFrontServicesMenu:")
-    // Removals leave leading and doubled dividers; a dropped item counts as
-    // transparent, so dividers either side of the Font submenu collapse too.
+    // Removals leave leading and doubled dividers; a dropped item counts as transparent.
     var previousWasSeparator = true
     var drop: [NSMenuItem] = []
     for item in menu.items {
         let action = item.action.map(NSStringFromSelector) ?? ""
-        // Services: matched by the services-menu identity (its submenu IS
-        // NSApp.servicesMenu), its action, or its title. Guard the nil case:
-        // with no services menu, `submenu === nil` would match every item
-        // that has no submenu (Cut, Copy, …).
+        // Services: matched by the services-menu identity (its submenu IS NSApp.servicesMenu),
+        // its action, or its title. Guard nil: `submenu === nil` matches every submenuless item.
         let isServices = (NSApp.servicesMenu != nil && item.submenu === NSApp.servicesMenu)
             || item.action == servicesAction
             || item.title == "Services"
@@ -56,8 +49,7 @@ func pruneSystemItems(from menu: NSMenu) {
 }
 
 // Focus is never forced from updateNSView — AppKit raises
-// NSInternalInconsistencyException for that; the subclass reports native
-// activation instead.
+// NSInternalInconsistencyException for that; the subclass reports native activation.
 final class CellTextView: NSTextView, NSMenuDelegate {
     var didBecomeFirstResponderHandler: (() -> Void)?
     var flushPendingEditsHandler: (() -> Void)?
@@ -70,9 +62,8 @@ final class CellTextView: NSTextView, NSMenuDelegate {
     var keyCommandHandler: ((NSEvent) -> Bool)?
     weak var undoManagerOverride: UndoManager?
     var highlightsCurrentLine = false
-    /// Set only in the grid: the model cell the shared editor currently
-    /// represents (handlers read it at fire time, so a re-point across a
-    /// table switch keeps reporting the right cell).
+    /// Set only in the grid: the model cell the shared editor currently represents;
+    /// handlers read it at fire time, so a re-point across a switch stays correct.
     var modelCell: GridCell?
     var modelStartCol = 0
     /// Drag-selection state, set only in the grid: this slot's visual
@@ -109,25 +100,20 @@ final class CellTextView: NSTextView, NSMenuDelegate {
     }
 
     /// The HTML pane's line-number ruler claims the clip's left edge through a
-    /// negative bounds origin (measured: {-40, 0} at rest); the width pins must
-    /// leave that strip for the ruler instead of zeroing it.
+    /// negative bounds origin; the width pins must leave that strip, not zero it.
     var rulerInset: CGFloat {
         guard let scroll = enclosingScrollView, scroll.rulersVisible,
               let ruler = scroll.verticalRulerView else { return 0 }
         return ruler.ruleThickness
     }
 
-    /// True when this text view is its scroll view's document view (the HTML
-    /// pane and the old per-cell wrappers). Pooled grid cells live inside a
-    /// shared document view; pinning them to the grid's clip width would
-    /// clamp every cell to the viewport.
+    /// True when this text view is its scroll view's document view (the HTML pane). Grid
+    /// editors live inside the shared document view; pinning them to the clip clamps cells.
     var pinsWidthToClip: Bool {
         guard let scroll = enclosingScrollView else { return false }
         return scroll.documentView === self
     }
 
-    /// Layout width: the clip's bounds when scrolled, else our bounds, minus
-    /// the horizontal inset and the ruler strip.
     var visibleLayoutWidth: CGFloat {
         let base = pinsWidthToClip ? (enclosingScrollView?.contentView.bounds.width ?? bounds.width) : bounds.width
         return max(base - 2 * textContainerInset.width - rulerInset, 1)
@@ -135,17 +121,13 @@ final class CellTextView: NSTextView, NSMenuDelegate {
 
     override func setFrameSize(_ newSize: NSSize) {
         var size = newSize
-        // Inside a grid cell the editor IS the cell's paint surface (border
-        // and background), so it fills the slot: TextKit's shrink-to-text
-        // height would clip the cell's paint to the text, and the old
-        // per-cell scroll view's tiling is gone to re-expand it.
+        // Inside a grid cell the editor IS the cell's paint surface (border and background),
+        // so it fills the slot: TextKit's shrink-to-text height would clip the paint.
         if let slot = superview as? GridCellClipView, slot.bounds.width > 0, slot.bounds.height > 0 {
             size = slot.bounds.size
         }
-        // No horizontal scrolling: the document view's width IS the clip's
-        // minus the ruler strip. On the user's Sequoia build the frame comes
-        // out wider (center shifts right, right-align lands off-screen), so
-        // pin it, not just the container. Grid cells keep their slot width.
+        // No horizontal scrolling: the document view's width IS the clip's minus the ruler
+        // strip. On Sequoia the frame comes out wider, so pin it, not just the container.
         if pinsWidthToClip, let clip = enclosingScrollView?.contentView, clip.bounds.width > 0 {
             let target = clip.bounds.width - rulerInset
             if abs(size.width - target) > 0.5 { size.width = target }
@@ -156,25 +138,21 @@ final class CellTextView: NSTextView, NSMenuDelegate {
 
     override func setFrameOrigin(_ newOrigin: NSPoint) {
         var origin = newOrigin
-        // No horizontal scrolling: the document view sits at the clip's left
-        // edge. On Sequoia the origin drifts negative and every alignment
-        // hangs off the left of the cell.
+        // No horizontal scrolling: the document view sits at the clip's left edge.
+        // On Sequoia the origin drifts negative and every alignment hangs off left.
         if enclosingScrollView != nil, origin.x < -0.5 {
             origin.x = 0
         }
         super.setFrameOrigin(origin)
     }
 
-    /// Pins the container to the visible width and the clip's x-offset to the
-    /// ruler strip (zero without one); a container size change invalidates the
-    /// layout automatically.
+    /// Pins the container to the visible width and the clip's x-offset to the ruler
+    /// strip (zero without one); the size change invalidates layout automatically.
     func syncContainerWidth() {
-        // Grid cells track their own frame via widthTracksTextView; the clip
-        // pin exists for the HTML pane only.
+        // Grid cells track their own frame via widthTracksTextView; the clip pin exists for the HTML pane only.
         guard pinsWidthToClip, let container = textContainer else { return }
-        // The ruler strip is a negative clip x-offset (HTML pane); without a
-        // ruler the document must start at the clip's left edge (Sequoia
-        // drifts it otherwise and every alignment shifts left).
+        // The ruler strip is a negative clip x-offset (HTML pane); without a ruler
+        // the document must start at the clip's left edge (Sequoia drifts it).
         if let clip = enclosingScrollView?.contentView {
             let expectedX = -rulerInset
             if abs(clip.bounds.origin.x - expectedX) > 0.5 {
@@ -193,10 +171,9 @@ final class CellTextView: NSTextView, NSMenuDelegate {
         }
         cellRangeHandler?(nil)
         isDraggingCells = false
-        // NSTextView.mouseDown pumps the whole click-drag gesture itself —
-        // subclass mouseDragged/mouseUp never fire — so the pointer is watched
-        // from a timer, which runs because the pump spins the runloop in
-        // eventTracking mode (measured, tools/dragsel_probe).
+        // NSTextView.mouseDown pumps the whole click-drag gesture itself — subclass
+        // mouseDragged/mouseUp never fire — so the pointer is watched from a timer,
+        // which runs because the pump spins the runloop in eventTracking mode.
         let watch = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
             self?.pollPointer()
         }
@@ -239,9 +216,8 @@ final class CellTextView: NSTextView, NSMenuDelegate {
             colEnd: max(origin.column + gridVisualSpan - 1, hit.column)))
     }
 
-    /// The grid's scroll view is the outermost one above the cell (each cell
-    /// carries its own wrapper); its top-origin document view is the space
-    /// drag hit-tests happen in.
+    /// The grid's scroll view is the outermost one above the cell; its
+    /// top-origin document view is the space drag hit-tests happen in.
     private var gridDocumentView: NSView? {
         var grid: NSScrollView?
         var view = superview
@@ -312,8 +288,7 @@ final class CellTextView: NSTextView, NSMenuDelegate {
         colspanSet?(sender.tag)
     }
 
-    /// The Colspan submenu for the context menu, mirroring Format ▸ Colspan:
-    /// items 1–6 with a checkmark on the cell's current span.
+    /// The context menu's Colspan submenu: items 1–6, checkmark on the cell's current span.
     func buildColspanMenu() -> NSMenu {
         let menu = NSMenu(title: "Colspan")
         let current = colspanCurrent?() ?? 1
@@ -347,28 +322,22 @@ final class CellTextView: NSTextView, NSMenuDelegate {
 
     override func menu(for event: NSEvent) -> NSMenu? {
         guard let menu = super.menu(for: event) else { return nil }
-        // AutoFill and Services are "contextual menu plug-in" items AppKit
-        // appends during display, after every delegate hook — so they can't be
-        // pruned, only opted out of. This flag (the mechanism Firefox and
-        // Chromium use) stops the append at the source.
+        // AutoFill and Services are "contextual menu plug-in" items AppKit appends during
+        // display, after every delegate hook — they can't be pruned, only opted out of.
         menu.allowsContextMenuPlugIns = false
         pruneSystemItems(from: menu)
         insertCellCommands(in: menu)
-        // Belt and braces: re-prune from the delegate right before the menu is
-        // drawn, in case any system item slips past the flag.
+        // Belt and braces: the delegate re-prunes right before display.
         menu.delegate = self
         return menu
     }
 
-    // Last-chance prune right before the menu is drawn, catching any system
-    // item (Font submenu, suggestion cluster) that survives the flag.
     func menuWillOpen(_ menu: NSMenu) {
         pruneSystemItems(from: menu)
     }
 
-    // Grid cells get row/column edits and the Colspan submenu right after the
-    // paste group, where the pruned menu already leaves a divider to close the
-    // group with.
+    // Grid cells get row/column edits and the Colspan submenu right after the paste
+    // group, where the pruned menu already leaves a divider to close the group with.
     private func insertCellCommands(in menu: NSMenu) {
         guard cellCommandHandler != nil else { return }
         let pasteActions: Set<String> = ["cut:", "copy:", "paste:", "pasteAsPlainText:"]
@@ -395,9 +364,8 @@ final class CellTextView: NSTextView, NSMenuDelegate {
     }
 }
 
-// Content sync is direct: the hosting body reads the model properties the
-// text depends on, so @Observable re-fires updateNSView on every change —
-// undo/redo included (htmlpane_probe guards that contract).
+// Content sync is direct: the hosting body reads the model properties the text
+// depends on, so @Observable re-fires updateNSView on every change — undo/redo included.
 struct NSTextViewRepresentable: NSViewRepresentable {
     var content: NSAttributedString
     /// Render key: the pane's body reads the model's revision, so any bump
@@ -432,8 +400,7 @@ struct NSTextViewRepresentable: NSViewRepresentable {
     var copyCells: (() -> Bool)?
     /// ⌘V with a table on the pasteboard makes a new table; true = handled.
     var pasteTable: (() -> Bool)?
-    /// Colspan context-menu support, set only in the grid: read the cell's
-    /// current span (for the checkmark) and set a new one on the cell.
+    /// Colspan context-menu support, grid only: read and set the cell's current span.
     var colspanCurrent: (() -> Int)?
     var colspanSet: ((Int) -> Void)?
 
@@ -444,8 +411,7 @@ struct NSTextViewRepresentable: NSViewRepresentable {
     }
 
     /// Header cells get a distinct system background so the header row stays
-    /// visually separate from the body; body cells fall back to the grid's
-    /// controlBackgroundColor.
+    /// visually separate from the body; body cells blend with controlBackgroundColor.
     static func background(isHeader: Bool) -> NSColor {
         isHeader ? .unemphasizedSelectedContentBackgroundColor : .controlBackgroundColor
     }
@@ -455,9 +421,8 @@ struct NSTextViewRepresentable: NSViewRepresentable {
     }
 
     func makeNSView(context: Context) -> NSScrollView {
-        // Explicit TextKit 1 stack at creation: touching .layoutManager on a
-        // default (TextKit 2) view switches layout systems mid-setup and the
-        // layer-backed view then renders blank. Temporary attributes need TK1.
+        // Explicit TextKit 1 stack at creation: touching .layoutManager on a default
+        // (TextKit 2) view switches layout systems mid-setup and renders blank. Temp attrs need TK1.
         let storage = NSTextStorage()
         let layoutManager = NSLayoutManager()
         storage.addLayoutManager(layoutManager)
@@ -472,10 +437,6 @@ struct NSTextViewRepresentable: NSViewRepresentable {
         // Undo is owned by the shared editor manager, not the text view.
         textView.allowsUndo = false
         textView.drawsBackground = true
-        // Header cells keep a distinct system background so the header row
-        // stays visually separate from the body; body cells blend with the
-        // grid's controlBackgroundColor. `updateNSView` re-applies it only
-        // when the value actually changes.
         textView.backgroundColor = Self.background(isHeader: isHeader)
         textView.textColor = .labelColor
         textView.insertionPointColor = .labelColor
@@ -490,8 +451,7 @@ struct NSTextViewRepresentable: NSViewRepresentable {
         textView.textContainerInset = NSSize(width: 3, height: 3)
         textView.minSize = .zero
         textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
-        // widthTracksTextView is the wrapping switch (no
-        // widthTracksLineFragmentSize in this SDK).
+        // widthTracksTextView is the wrapping switch (no widthTracksLineFragmentSize in this SDK).
         textView.isHorizontallyResizable = false
         textView.isVerticallyResizable = true
         textView.autoresizingMask = [.width]
@@ -533,14 +493,11 @@ struct NSTextViewRepresentable: NSViewRepresentable {
         wire(textView: textView, coordinator: context.coordinator)
         // @Observable re-fires this on every model change, so the pane
         // applies directly; apply() skips the write when the text is equal.
-        let tPane = RTSwitchTrace.now  // TEMP
         context.coordinator.apply(content: content, to: textView)
-        RTSwitchTrace.log("pane apply dt=\(String(format: "%.1f", RTSwitchTrace.now - tPane))ms syn=\(highlightsSyntax ? 1 : 0)")  // TEMP
         context.coordinator.applyAlignmentIfNeeded(to: textView)
 
-        // Focus bridge: follow false→true grid moves only when the keyboard
-        // is already in the grid; initial creation (nil→true) must not steal
-        // focus, preserving the click-to-edit contract.
+        // Focus bridge: follow false→true grid moves only when the keyboard is already
+        // in the grid; initial creation (nil→true) must not steal focus (click-to-edit).
         if context.coordinator.lastFocused != isFocused {
             let previous = context.coordinator.lastFocused
             context.coordinator.lastFocused = isFocused
@@ -553,9 +510,6 @@ struct NSTextViewRepresentable: NSViewRepresentable {
             }
         }
 
-        // Header cells keep a distinct system background so the header row
-        // stays visually separate from the body; body cells blend with the
-        // grid's controlBackgroundColor. Only write when it actually changes.
         if !textView.backgroundColor.isEqual(Self.background(isHeader: isHeader)) {
             textView.backgroundColor = Self.background(isHeader: isHeader)
         }
@@ -598,18 +552,14 @@ struct NSTextViewRepresentable: NSViewRepresentable {
         var parent: NSTextViewRepresentable
         var lastFocused: Bool?
         var lastAppliedAlignment: NSTextAlignment?
-        // The regex pass reruns on every pane update, but table switches feed
-        // the identical string back through; caching by text keeps revisits
-        // free. Two slots, least-recently-used: toggling between two tables
-        // misses a single-slot cache every time. (Colors are dynamic NSColors,
-        // so the cache survives appearance changes.)
+        // Table switches feed the identical string back through the regex pass; caching by
+        // text keeps revisits free. Two LRU slots because a single-slot cache misses A/B/A.
         private var cachedRuns: [(text: String, runs: [(NSRange, NSColor)])] = []
         // AppKit echoes programmatic text/selection swaps back as delegate
         // callbacks; publishing those would mutate the model mid-view-update.
         var applyingProgrammaticContent = false
-        // Decoration (syntax runs + ruler) is purely visual: SwiftUI re-fires
-        // updateNSView several times per switch, and each synchronous pass
-        // blocked the click turn. One coalesced pass on the next turn instead.
+        // Decoration is purely visual; SwiftUI re-fires updateNSView several
+        // times per switch, so refreshes coalesce to one pass on the next turn.
         private var decorationsScheduled = false
 
         init(parent: NSTextViewRepresentable) {
@@ -617,10 +567,8 @@ struct NSTextViewRepresentable: NSViewRepresentable {
         }
 
         func apply(content: NSAttributedString, to textView: CellTextView) {
-            // Plain-string equality is a sufficient skip: the model's content
-            // is style-free and the view layer only ever adds paragraph style,
-            // which the alignment pass re-applies on its own. The previous
-            // attributed copy-and-compare cost a full storage copy per pass.
+            // Plain-string equality is a sufficient skip: model content is
+            // style-free and the alignment pass re-applies the paragraph style.
             let current = textView.textStorage ?? NSAttributedString()
             if current.length == content.length, current.string == content.string {
                 applyAlignmentIfNeeded(to: textView)
@@ -637,10 +585,8 @@ struct NSTextViewRepresentable: NSViewRepresentable {
             }
             textView.selectedRanges = selection
             applyingProgrammaticContent = false
-            // The swap reset the stored style; re-apply the alignment. A
-            // left-aligned cell needs no write — style-free content already
-            // renders left (natural) for LTR text — so skip the full-range
-            // paragraph-style pass, the biggest per-cell cost in the swap.
+            // The swap reset the stored style; re-apply the alignment. A left-aligned cell needs
+            // no write — style-free content renders left for LTR — the pass is the swap's cost.
             if parent.textAlignment == .left {
                 lastAppliedAlignment = .left
             } else {
@@ -648,9 +594,7 @@ struct NSTextViewRepresentable: NSViewRepresentable {
             }
         }
 
-        /// Writes the alignment into the storage (render + the source a
-        /// selection re-sync reads) and typingAttributes (typed text before a
-        /// re-sync fires).
+        /// Writes the alignment into the storage and typingAttributes (typed text before a re-sync fires).
         func applyAlignment(to textView: CellTextView) {
             lastAppliedAlignment = parent.textAlignment
             // Re-pin the layout width where alignment is (re)applied, so a
@@ -661,8 +605,7 @@ struct NSTextViewRepresentable: NSViewRepresentable {
             style.alignment = parent.textAlignment
             if storage.length > 0 {
                 // addAttribute, not setAttributes: the latter replaces the whole
-                // attribute dict and would wipe .foregroundColor (labelColor),
-                // turning the text black in dark mode.
+                // attribute dict and would wipe .foregroundColor, blacking the text.
                 storage.addAttribute(.paragraphStyle, value: style,
                                      range: NSRange(location: 0, length: storage.length))
             }
@@ -671,14 +614,12 @@ struct NSTextViewRepresentable: NSViewRepresentable {
             textView.typingAttributes = ta
         }
 
-        /// Re-applies the alignment only when it changed since the last write.
         func applyAlignmentIfNeeded(to textView: CellTextView) {
             guard parent.textAlignment != lastAppliedAlignment else { return }
             applyAlignment(to: textView)
         }
 
-        /// A copy without .paragraphStyle, so equality checks ignore the
-        /// view-layer alignment (the model's content is style-free).
+        /// A copy without .paragraphStyle, so equality ignores the view-layer alignment.
         static func strippingParagraphStyle(_ s: NSAttributedString) -> NSAttributedString {
             guard s.length > 0 else { return s }
             let copy = NSMutableAttributedString(attributedString: s)
@@ -708,9 +649,8 @@ struct NSTextViewRepresentable: NSViewRepresentable {
         func textDidEndEditing(_ notification: Notification) {
             guard let textView = notification.object as? NSTextView else { return }
             let loc = min(textView.selectedRange().location, (textView.string as NSString).length)
-            // Guard the echo: this programmatic swap fires selectionDidChange,
-            // and publishing it mid-view-update is the "publishing from within
-            // view updates" fault.
+            // Guard the echo: this programmatic swap fires selectionDidChange, and
+            // publishing it mid-view-update is the "publishing within view updates" fault.
             applyingProgrammaticContent = true
             textView.selectedRanges = [NSValue(range: NSRange(location: loc, length: 0))]
             applyingProgrammaticContent = false
@@ -721,12 +661,9 @@ struct NSTextViewRepresentable: NSViewRepresentable {
             }
         }
 
-        // Derived decoration only: layout-manager temporary attributes never
-        // reach the text storage, so the model, undo, and equality-skip sync
-        // stay untouched.
+        // Derived decoration only: layout-manager temporary attributes never reach
+        // the text storage, so the model, undo, and equality-skip sync stay untouched.
         func refreshDecorations(_ textView: NSTextView) {
-            let tDec = RTSwitchTrace.now  // TEMP
-            defer { RTSwitchTrace.log("decor dt=\(String(format: "%.1f", RTSwitchTrace.now - tDec))ms syntax=\(parent.highlightsSyntax ? 1 : 0)") }  // TEMP
             if parent.highlightsSyntax, let layoutManager = textView.layoutManager {
                 let ns = textView.string as NSString
                 let full = NSRange(location: 0, length: ns.length)
@@ -749,8 +686,6 @@ struct NSTextViewRepresentable: NSViewRepresentable {
             if parent.highlightsSyntax || parent.highlightsCurrentLine { textView.needsDisplay = true }
         }
 
-        /// Next-turn, coalesced variant of refreshDecorations for the
-        /// SwiftUI update path (see decorationsScheduled).
         func scheduleDecorations(_ textView: NSTextView) {
             guard !decorationsScheduled else { return }
             decorationsScheduled = true
@@ -789,8 +724,8 @@ final class LineNumberRulerView: NSRulerView {
     @objc private func scrollChanged() { needsDisplay = true }
 
     override func drawHashMarksAndLabels(in rect: NSRect) {
-        // AppKit hands this method an unclipped, sometimes infinite rect (measured:
-        // ±9e307), not the 40pt strip — filling it paints over the text. Clip it.
+        // AppKit hands this method an unclipped, sometimes infinite rect, not
+        // the 40pt strip — filling it paints over the text. Clip it.
         NSColor.textBackgroundColor.setFill()
         rect.intersection(bounds).fill()
         guard let textView, let layoutManager = textView.layoutManager,
@@ -811,8 +746,7 @@ final class LineNumberRulerView: NSRulerView {
             var effective = NSRange()
             let lineRect = layoutManager.lineFragmentRect(forGlyphAt: index, effectiveRange: &effective)
             let charRange = layoutManager.characterRange(forGlyphRange: effective, actualGlyphRange: nil)
-            // Wrapped fragments repeat their line, so only label fragments that
-            // begin right after a hard break.
+            // Wrapped fragments repeat their line, so only label fragments that begin right after a hard break.
             let startsLine = charRange.location == 0 || ns.character(at: charRange.location - 1) == 10
             if startsLine {
                 let label = "\(lineNumber)" as NSString

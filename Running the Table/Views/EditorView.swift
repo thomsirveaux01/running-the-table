@@ -1,7 +1,6 @@
 import SwiftUI
 
-// Groups must go through .toolbar (not a body HStack), each in a
-// ToolbarItemGroup, or placements clash.
+// Groups must go through .toolbar (not a body HStack), each in a ToolbarItemGroup, or placements clash.
 struct EditorView: View {
     @Bindable var viewModel: TableViewModel
 
@@ -41,8 +40,9 @@ struct EditorView: View {
 
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
-        // Same button face in both states; it only gains the pull-down once a
-        // template exists, so a fresh install keeps a plain one-click New.
+        // Same button face in both states; it only gains the pull-down once a template
+        // exists, so a fresh install keeps a plain one-click New. Not .navigation: the
+        // leading region reserves a 53pt toggle slot that shifts when the sidebar collapses.
         ToolbarItem(placement: .automatic) {
             if viewModel.templates.isEmpty {
                 Button {
@@ -54,8 +54,7 @@ struct EditorView: View {
                 .accessibilityLabel("New Table")
             } else {
                 Menu {
-                    // ⌘N belongs to File ▸ New Table; a toolbar copy of the
-                    // chord would double-claim it.
+                    // ⌘N belongs to File ▸ New Table; a toolbar copy of the chord would double-claim it.
                     Button("Blank Table") { viewModel.newTable() }
                     Divider()
                     ForEach(viewModel.sortedTemplates) { template in
@@ -106,7 +105,7 @@ struct EditorView: View {
         }
 
         // The align control is its own drop-down pill: a Menu inside the group
-        // above would split that pill (measured), so it stands alone here.
+        // above would split that pill, so it stands alone here.
         ToolbarItem(placement: .automatic) {
             Menu {
                 ForEach([NSTextAlignment.left, .center, .right], id: \.self) { alignment in
@@ -179,11 +178,9 @@ struct EditorView: View {
     }
 }
 
-/// VSplitView has no initial-position API and always opens 50/50 (measured:
-/// pane idealHeights are ignored), so the first layout nudges the underlying
-/// NSSplitView's divider to the wanted fraction. Once per split-view
-/// instance; afterwards user drags and window resizes (which rescale the
-/// split proportionally) are left alone.
+/// VSplitView has no initial-position API and always opens 50/50 (pane idealHeights are
+/// ignored), so the first layout nudges the underlying NSSplitView's divider to the
+/// wanted fraction — once per instance; afterwards user drags and proportional resizes stand.
 private struct InitialSplitSetter: NSViewRepresentable {
     let fraction: CGFloat
 

@@ -2,16 +2,12 @@ import AppKit
 import Foundation
 import UniformTypeIdentifiers
 
-// GFM pipe table import/export. The scanner finds top-level pipe tables in a
-// Markdown file (fence-, setext-, and HTML-block-aware) and turns each into
-// standard <table> HTML for the existing parser; the renderer writes one
-// table back out. The model only holds bold, italic, link, and newline, so
-// the inline converter degrades everything else to plain text.
+// GFM pipe table import/export. The scanner finds top-level pipe tables (fence-, setext-,
+// and HTML-block-aware) and turns each into standard <table> HTML for the existing parser.
 enum MarkdownTable {
 
-    /// One pipe table found in a file: the title to give it (the nearest
-    /// preceding ATX heading, or nil for the caller's file-stem fallback) and
-    /// the standard <table> HTML the existing parser turns into a document.
+    /// One pipe table found in a file: the title to give it (the nearest preceding
+    /// ATX heading, or nil for the caller's file-stem fallback) and standard <table> HTML.
     struct Found {
         let title: String?
         let html: String
@@ -19,11 +15,8 @@ enum MarkdownTable {
 
     // MARK: - Scanning
 
-    /// Every top-level pipe table in the file, in order. A table is a header
-    /// line whose next line is a valid delimiter with a matching cell count;
-    /// the body runs to the first line that can open its own block (blank,
-    /// fence, heading, blockquote, list, thematic break, HTML block, or an
-    /// indented code line), exactly as the GFM parser closes the table.
+    /// Every top-level pipe table, in order. A table is a header line followed by a valid
+    /// delimiter with a matching cell count; the body runs to the first line that can open its own block.
     static func tables(in text: String) -> [Found] {
         var source = text
         if source.hasPrefix("\u{FEFF}") { source.removeFirst() }
@@ -115,8 +108,7 @@ enum MarkdownTable {
         return nil
     }
 
-    /// A closing fence: only the fence character, at least as long as the
-    /// opener, nothing else.
+    /// A closing fence: only the fence character, at least as long as the opener, nothing else.
     private static func isFenceClose(_ line: String, char: Character, length: Int) -> Bool {
         guard indentWidth(line) < 4 else { return false }
         let trimmed = line.trimmingCharacters(in: .whitespaces)
@@ -143,9 +135,8 @@ enum MarkdownTable {
         return text.isEmpty ? nil : text
     }
 
-    // The GFM HTML block kinds and what ends each: type 1 runs to a line
-    // holding any of the four closing tags, types 2-5 to their end markers,
-    // type 6 to a blank line, type 7 is the single start line.
+    // The GFM HTML block kinds and what ends each: type 1 runs to a line holding any
+    // of the four closing tags, types 2-5 to their end markers, type 6 to a blank line.
     private enum HTMLBlockKind {
         case singleLine
         case untilBlank
@@ -166,8 +157,7 @@ enum MarkdownTable {
         "thead", "tr", "track", "ul",
     ]
 
-    // Type 7: exactly one complete tag, then only whitespace to end of line.
-    // Two tags on a line (<div></div>) is not a block; it stays a table row.
+    // Type 7: exactly one complete tag then whitespace; two tags (<div></div>) stays a table row.
     private static let completeTagPattern = try! NSRegularExpression(
         pattern: "^</?[A-Za-z][A-Za-z0-9-]*(?:[ \t]+[a-zA-Z_:][a-zA-Z0-9:._-]*"
             + "(?:[ \t]*=[ \t]*(?:\"[^\"]*\"|'[^']*'|[^ \t\r\n\u{0B}\u{0C}\"'=<>`]+))?[ \t]*)*"
@@ -227,7 +217,6 @@ enum MarkdownTable {
         return nil
     }
 
-    /// Whether a line ends an open HTML block of the given kind.
     private static func htmlBlockEnds(_ block: HTMLBlockKind, on line: String) -> Bool {
         switch block {
         case .singleLine: return true
@@ -277,8 +266,7 @@ enum MarkdownTable {
         return pipes >= 2 || trimmed.contains(where: { $0 != "|" })
     }
 
-    /// A table body row: any line that can't open its own block, per the GFM
-    /// parser's table-close rules (a table only ever keeps rows).
+    /// A table body row: any line that can't open its own block (GFM's table-close rules).
     private static func isBodyRow(_ line: String) -> Bool {
         guard !line.trimmingCharacters(in: .whitespaces).isEmpty else { return false }
         guard indentWidth(line) < 4 else { return false }
@@ -291,9 +279,8 @@ enum MarkdownTable {
             && !isThematicBreak(line)
     }
 
-    /// A delimiter line's cell count and per-column alignment, or nil. A
-    /// pure-hyphen line is a setext underline or thematic break, never a
-    /// delimiter, so a pipe or colon is required.
+    /// A delimiter line's cell count and per-column alignment, or nil. A pure-hyphen
+    /// line is a setext underline or thematic break, so a pipe or colon is required.
     private static func delimiterInfo(_ line: String) -> (cellCount: Int, alignments: [NSTextAlignment])? {
         let trimmed = line.trimmingCharacters(in: .whitespaces)
         guard trimmed.contains("|") || trimmed.contains(":") else { return nil }
@@ -309,9 +296,8 @@ enum MarkdownTable {
         return (cells.count, alignments)
     }
 
-    /// The line's cells: one optional outer pipe stripped, then split on
-    /// pipes that are neither backslash-escaped (odd run) nor inside a
-    /// matched code span; an escaped pipe unescapes to a literal.
+    /// The line's cells: one optional outer pipe stripped, then split on pipes that
+    /// are neither backslash-escaped (odd run) nor inside a matched code span.
     private static func splitRow(_ line: String) -> [String] {
         var chars = Array(line.trimmingCharacters(in: .whitespaces))
         if let first = chars.first, first == "|" { chars.removeFirst() }
@@ -367,9 +353,8 @@ enum MarkdownTable {
         return inside
     }
 
-    /// Standard <table> HTML for the existing parser: head promotion, the
-    /// delimiter's per-column alignment, and body rows padded to the header
-    /// width (extra cells dropped, as GFM does).
+    /// Standard <table> HTML for the existing parser: head promotion, the delimiter's
+    /// per-column alignment, and body rows padded to the header width (extras dropped).
     private static func buildHTML(header: String, delimiter: String, body: [String]) -> String {
         let headerCells = splitRow(header)
         let alignments = delimiterInfo(delimiter)?.alignments ?? []
@@ -386,7 +371,8 @@ enum MarkdownTable {
                 let cells = splitRow(row)
                 lines.append("<tr>")
                 for i in 0..<headerCells.count {
-                    lines.append("<td>\(convertInline(i < cells.count ? cells[i] : ""))</td>")
+                    let align = i < alignments.count ? alignments[i] : .left
+                    lines.append("<td\(styleAttr(align))>\(convertInline(i < cells.count ? cells[i] : ""))</td>")
                 }
                 lines.append("</tr>")
             }
@@ -402,10 +388,8 @@ enum MarkdownTable {
 
     // MARK: - Inline conversion
 
-    /// Cell text → HTML the existing fragment parser honors: <strong>, <em>,
-    /// <a>, and <br> only. Code spans, images, and strikethrough degrade to
-    /// their plain text; non-representable raw HTML tags are stripped keeping
-    /// their content; entities pass through for the fragment parser to decode.
+    /// Cell text → HTML the fragment parser honors: <strong>, <em>, <a>, <br> only; code
+    /// spans, images, and strikethrough degrade to text; non-representable tags strip keeping content.
     static func convertInline(_ text: String) -> String {
         parseInline(Array(text))
     }
@@ -471,9 +455,8 @@ enum MarkdownTable {
                 continue
             }
 
-            // Angle brackets: <br>, autolinks, representable tags (passed
-            // through for the fragment parser), and raw HTML (stripped).
-            // Attribute values may contain '>', so the scan tracks quotes.
+            // Angle brackets: <br>, autolinks, representable tags (passed through), and
+            // raw HTML (stripped). Attribute values may contain '>', so the scan tracks quotes.
             if c == "<" {
                 var gt = i + 1
                 var quote: Character?
@@ -517,8 +500,7 @@ enum MarkdownTable {
                 continue
             }
 
-            // A valid entity passes through verbatim; a bare ampersand is
-            // escaped so it survives as a literal.
+            // A valid entity passes through verbatim; a bare ampersand is escaped so it survives as a literal.
             if c == "&", let (entity, end) = entity(from: i, in: chars) {
                 out += entity
                 i = end
@@ -557,9 +539,8 @@ enum MarkdownTable {
         return nil
     }
 
-    /// [label](destination "title") parts, or nil; the label may nest
-    /// brackets, the destination may be angle-bracketed, and a title is
-    /// dropped.
+    /// [label](destination "title") parts, or nil; the label may nest brackets, the
+    /// destination may be angle-bracketed, and a title is dropped.
     private static func linkParts(from start: Int, in chars: [Character])
         -> (label: String, url: String, end: Int)? {
         let n = chars.count
@@ -616,16 +597,14 @@ enum MarkdownTable {
         return (label, destination, m + 1)
     }
 
-    /// Emphasis at a * or _ run: *** is bold+italic, ** bold, * italic (and
-    /// the _ pairs); the closer is the next run of at least the same length,
-    /// flanking-aware, skipping code spans.
+    /// Emphasis at a * or _ run: *** bold+italic, ** bold, * italic (and the _ pairs);
+    /// the closer is the next run of at least the same length, flanking-aware, skipping code spans.
     private static func emphasis(_ marker: Character, at start: Int, in chars: [Character])
         -> (String, Int)? {
         let n = chars.count
         var run = 0
         while start + run < n, chars[start + run] == marker { run += 1 }
-        // A 4+ run re-matches from the next marker, leaving one literal on
-        // each side, exactly as GFM does.
+        // A 4+ run re-matches from the next marker, leaving one literal on each side, exactly as GFM does.
         if run > 3 { return nil }
         let level = min(run, 3)
         // Flanking: the opener must not be followed by whitespace, and an
@@ -748,8 +727,7 @@ enum MarkdownTable {
         c.isLetter || c.isNumber || c == "_"
     }
 
-    /// A heading line's plain title: convert the inline markup, drop the
-    /// tags, and decode the entities.
+    /// A heading line's plain title: convert the inline markup, drop the tags, and decode the entities.
     private static func titleText(fromHeadingText text: String) -> String {
         var html = convertInline(text)
             .replacingOccurrences(of: "<br>", with: " ")
@@ -760,9 +738,8 @@ enum MarkdownTable {
 
     // MARK: - Rendering
 
-    /// The table as GFM pipe-table Markdown, or nil when it has no header
-    /// row (Markdown requires one). Merged cells flatten to their top-left
-    /// slot; the delimiter carries the header row's per-column alignment.
+    /// The table as GFM pipe-table Markdown, or nil without a header row (Markdown requires
+    /// one). Merged cells flatten to their top-left slot; the delimiter carries the head's alignment.
     @MainActor
     static func markdown(for table: Table) -> String? {
         guard let headIndex = table.rows.firstIndex(where: { $0.section == .head }) else { return nil }
@@ -803,9 +780,8 @@ enum MarkdownTable {
         }
     }
 
-    /// One cell's attributed content as Markdown: the model's bold, italic,
-    /// link, and newline become ** * []() and <br>; plain text is escaped so
-    /// a re-import parses it back identically.
+    /// One cell's attributed content as Markdown: the model's bold, italic, link, and
+    /// newline become ** * []() and <br>; plain text is escaped so a re-import parses identically.
     private static func renderCell(_ cell: TableCell) -> String {
         let text = cell.content
         guard text.length > 0 else { return "" }
@@ -834,8 +810,7 @@ enum MarkdownTable {
         return result
     }
 
-    /// Escapes the characters Markdown would otherwise read as syntax, so a
-    /// rendered cell re-imports byte-identical.
+    /// Escapes what Markdown would read as syntax, so a rendered cell re-imports byte-identical.
     private static func escapeMarkdownText(_ text: String) -> String {
         var out = ""
         out.reserveCapacity(text.count)
@@ -858,8 +833,7 @@ enum MarkdownTable {
 
     // MARK: - Loss disclosure
 
-    /// The specific markup Markdown cannot keep, one line per condition;
-    /// empty when the table exports cleanly.
+    /// The specific markup Markdown cannot keep, one line per condition; empty when the table exports cleanly.
     static func losses(for table: Table) -> [String] {
         var losses: [String] = []
         let slots = table.placements()
@@ -937,8 +911,7 @@ enum MarkdownTable {
             losses.append("\(footRows.count) footer row\(footRows.count == 1 ? "" : "s") will become body rows.")
         }
 
-        // Non-representable HTML: tags outside the model's bold/italic/link/
-        // newline set.
+        // Non-representable HTML: tags outside the model's bold/italic/link/newline set.
         var tags: [String] = []
         var htmlCellCount = 0
         for row in table.rows {
@@ -964,7 +937,6 @@ enum MarkdownTable {
     private static let tagNamePattern = try! NSRegularExpression(
         pattern: "</?([a-zA-Z][a-zA-Z0-9]*)")
 
-    /// First-seen-ordered unique capture-1 matches of the pattern.
     private static func names(matching pattern: NSRegularExpression, in text: String) -> [String] {
         var seen: [String] = []
         for match in pattern.matches(in: text, range: NSRange(location: 0, length: (text as NSString).length)) {
@@ -976,9 +948,8 @@ enum MarkdownTable {
     }
 }
 
-// File picking behind protocols so headless probes script the chosen URL
-// instead of raising a panel, mirroring the CSV seams. Both present as a
-// window-modal sheet (anchored to the titlebar) via beginSheetModal.
+// File picking behind protocols so tests script the chosen URL instead of raising
+// a panel, mirroring the CSV seams. Both present as a titlebar-anchored sheet.
 
 protocol MarkdownFileImporting {
     func chooseMarkdownFile(prompt: String, into window: NSWindow?, completion: @escaping (URL?) -> Void)
@@ -1006,6 +977,7 @@ struct SystemMarkdownImporter: MarkdownFileImporting {
         panel.allowsMultipleSelection = false
         panel.showsHiddenFiles = false
         panel.allowedContentTypes = markdownImportTypes
+        panel.delegate = ImportPanelFilter.markdown
         if let window = window ?? NSApp.keyWindow ?? NSApp.mainWindow {
             panel.beginSheetModal(for: window) { response in
                 completion(response == .OK ? panel.url : nil)

@@ -1,15 +1,12 @@
 import AppKit
-import Combine
 import Foundation
+import Observation
 
-// The library defaults to the sandboxed container Documents (no prompts);
-// Settings can move it anywhere via a security-scoped bookmark that keeps
-// autosave legal there. Templates live inside the library, so a synced folder
-// syncs them too.
+// The library defaults to the sandboxed container Documents (no prompts); Settings moves it
+// anywhere via a security-scoped bookmark (keeps autosave legal). Templates ride the library.
 
-/// Folder picking behind a protocol so headless probes script the result
-/// instead of raising a panel on the user's screen. Presented as a window-
-/// modal sheet (anchored to the titlebar) via the documented beginSheetModal.
+/// Folder picking behind a protocol so tests script the result instead of raising a
+/// panel; presented as a titlebar-anchored window-modal sheet via beginSheetModal.
 protocol FolderChoosing {
     func chooseDirectory(prompt: String, suggestedName: String?, defaultURL: URL?,
                          into window: NSWindow?, completion: @escaping (URL?) -> Void)
@@ -53,8 +50,8 @@ enum LibraryLocation {
     static let bookmarkKey = "LibraryFolderBookmark"
     static let grantedPathKey = "LibraryFolderGrantedPath"
 
-    // Injectable seams: probes swap the store, the panel, and the codec — a
-    // non-sandboxed probe process cannot mint security-scoped bookmarks.
+    // Injectable seams: tests swap the store, the panel, and the codec — a
+    // non-sandboxed test process cannot mint security-scoped bookmarks.
     static var defaults: UserDefaults = .standard
     static var chooser: FolderChoosing = SystemFolderChooser()
     static var writeBookmarkData: (URL) -> Data? = {
@@ -81,7 +78,7 @@ enum LibraryLocation {
             .appendingPathComponent("Documents", isDirectory: true)
     }
 
-    /// Default library: the sandboxed container's Documents. Probes override
+    /// Default library: the sandboxed container's Documents. Tests override
     /// because a bare executable's Documents is the user's real ~/Documents.
     static var containerOverride: URL?
     static var containerDefault: URL {
@@ -93,8 +90,8 @@ enum LibraryLocation {
 
     static var directory: URL { granted ?? containerDefault }
 
-    /// One resolution per launch: a live bookmark wins; a dead one is reported
-    /// (the stored path survives for the recovery alert) never silently dropped.
+    /// One resolution per launch: a live bookmark wins; a dead one is reported (the
+    /// stored path survives for the recovery alert), never silently dropped.
     @discardableResult
     static func resolveGrant() -> URL? {
         guard let data = defaults.data(forKey: bookmarkKey) else { return nil }
@@ -201,25 +198,25 @@ enum LibraryLocation {
 // Launch-time and Settings driver: owns lost-access recovery and the
 // change-folder move/copy, reloading the view model after every root change.
 @MainActor
-final class LibraryCoordinator: ObservableObject {
+@Observable
+final class LibraryCoordinator {
     enum Step: Equatable {
         case none
         case lostAccess(path: String)
         case moveOffer(count: Int, from: URL, to: URL)
     }
 
-    @Published var step: Step = .none
-    @Published var failure: String?
-    @Published private(set) var currentPath: String = LibraryLocation.directory.path
+    var step: Step = .none
+    var failure: String?
+    private(set) var currentPath: String = LibraryLocation.directory.path
     // Settings is a sheet on the main window, not a window of its own.
-    @Published var showSettings = false
+    var showSettings = false
 
     weak var viewModel: TableViewModel?
     private var promptedThisLaunch = false
 
-    /// First ContentView appearance per launch: a stored grant resolves; a dead
-    /// one raises recovery. The container default needs no prompt, so launch is
-    /// silent.
+    /// First ContentView appearance per launch: a stored grant resolves; a dead one
+    /// raises recovery. The container default needs no prompt, so launch is silent.
     func launchOnce() {
         guard !promptedThisLaunch else { return }
         promptedThisLaunch = true
@@ -252,15 +249,13 @@ final class LibraryCoordinator: ObservableObject {
                 self.viewModel?.reloadFromDisk()
                 return
             }
-            // The move sheet rides the same window as the Settings sheet, so
-            // Settings steps aside first.
+            // The move sheet rides the same window as the Settings sheet, so Settings steps aside first.
             self.showSettings = false
             self.step = .moveOffer(count: count, from: current, to: chosen)
         }
     }
 
-    // The grant only lands once the files have, so a failed copy leaves the
-    // user exactly where they started.
+    // The grant only lands once the files have, so a failed copy leaves the user exactly where they started.
     func resolveMove(copy: Bool) {
         guard case let .moveOffer(_, from, to) = step else { return }
         step = .none

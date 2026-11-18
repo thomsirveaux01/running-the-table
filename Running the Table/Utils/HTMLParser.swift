@@ -1,8 +1,7 @@
 import AppKit
 
-/// Everything one HTML source document carries: the editable grid plus the
-/// markup around and inside it that the grid cannot show but a re-export must
-/// keep byte-faithful.
+/// Everything one HTML source document carries: the editable grid plus the markup
+/// around and inside it that a re-export must keep byte-faithful.
 struct ParsedTable {
     var rows: [TableRow] = []
     var caption: NSAttributedString?
@@ -43,8 +42,7 @@ enum HTMLParser {
         var range: NSRange         // verbatim slice of the source
     }
 
-    /// One-pass scanner. Attribute values may contain '>' (e.g. style="a>b"),
-    /// so tag ends track quote state.
+    /// One-pass scanner. Attribute values may contain '>' (e.g. style="a>b"), so tag ends track quote state.
     private static func tokenize(_ source: String) -> [Token] {
         let ns = source as NSString
         let end = ns.length
@@ -192,8 +190,6 @@ enum HTMLParser {
         return pieces.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    /// The value of a cell's style attribute, unquoted and empty when there
-    /// is none.
     private static func styleValue(in attrText: String) -> String {
         let ns = attrText as NSString
         guard let match = styleAttributePattern.firstMatch(in: attrText,
@@ -221,10 +217,8 @@ enum HTMLParser {
         }
     }
 
-    /// Pulls the `text-align` declaration out of a cell's verbatim attribute
-    /// text and returns the rest, untouched; the model owns alignment, the
-    /// author's other declarations ride verbatim. An empty style leaves the
-    /// whole attribute gone so the markup never carries `style=""`.
+    /// Pulls the `text-align` declaration out of a cell's verbatim attribute text and returns
+    /// the rest untouched (the model owns alignment); an empty style takes the attribute too.
     private static func extractAlignment(from attrText: String) -> (attributes: String,
                                                                      alignment: NSTextAlignment) {
         let ns = attrText as NSString
@@ -241,13 +235,11 @@ enum HTMLParser {
         // Group 1 is the declaration's value, running to the next semicolon.
         let rawValue = (styleValue as NSString).substring(with: alignMatch.range(at: 1)).trimmingCharacters(in: .whitespaces)
         let alignment = Self.alignment(from: rawValue)
-        // Drop the declaration from the style value; keep the remaining
-        // declarations (never a stray semicolon) and the rest of the text.
+        // Drop the declaration from the style value, keeping the other declarations.
         let sv = styleValue as NSString
         let remainingStyle = sv.substring(with: NSRange(location: 0, length: declRange.location))
             + sv.substring(with: NSRange(location: declRange.location + declRange.length,
                                          length: sv.length - declRange.location - declRange.length))
-        // Drop the removed declaration and any stray semicolons.
         let remaining = remainingStyle
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .components(separatedBy: ";")
@@ -327,8 +319,7 @@ enum HTMLParser {
                     i += 1
                 }
             case (.open, "colgroup"), (.open, "col"):
-                // </colgroup> is optional in HTML; the block ends at the
-                // first tag that cannot belong to it.
+                // </colgroup> is optional in HTML; the block ends at the first tag that cannot belong to it.
                 var j = i + 1
                 while j < tokens.count, tokens[j].kind == .open,
                       tokens[j].name == "col" || tokens[j].name == "colgroup" { j += 1 }
@@ -336,9 +327,8 @@ enum HTMLParser {
                     j = end + 1
                 }
                 let blockEnd = j < tokens.count ? tokens[j].range.location : ns.length
-                // Drop the whitespace before the following tag: the generator
-                // adds its own newline, and keeping both would grow the file
-                // on every save.
+                // Drop the whitespace before the following tag: the generator adds its own
+                // newline, and keeping both would grow the file on every save.
                 let block = ns.substring(with: NSRange(location: t.range.location,
                                                        length: blockEnd - t.range.location))
                 p.columnMarkup.append(block.replacingOccurrences(of: "\\s+$", with: "", options: .regularExpression))
@@ -431,10 +421,8 @@ enum HTMLParser {
         token.attributeText.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    /// Parses one cell. At nesting depth 0 (outside any nested table) the
-    /// next cell, a row/section end tag, or another structural open all end
-    /// this cell — HTML lets those stand in for </td>. Inside a nested
-    /// table everything passes through untouched.
+    /// Parses one cell. At nesting depth 0 the next cell, a row/section end tag, or another
+    /// structural open end this cell (HTML stands those in for </td>); nested tables pass through.
     private static func parseCell(_ tokens: [Token], at index: Int, ns: NSString,
                                   into cells: inout [TableCell], p: inout ParsedTable) -> Int {
         let t = tokens[index]
@@ -512,8 +500,7 @@ enum HTMLParser {
 
     // MARK: - Plain text
 
-    // Content without a <table> tag is read as plain text: newlines make
-    // rows, tabs make cells.
+    // Content without a <table> tag is read as plain text: newlines make rows, tabs make cells.
     private static func parsePlainText(_ text: String) -> [[TableCell]] {
         let decoded = decodeEntities(stripTags(text))
         let lines = decoded.components(separatedBy: .newlines)
@@ -600,9 +587,8 @@ enum HTMLParser {
 
     // MARK: - Entities
 
-    /// Named entities decoded on import; anything unknown (rare names, typos
-    /// like "&amph;") survives verbatim rather than mangling the text. One
-    /// regex pass means "&amp;lt;" decodes to "&lt;", never further.
+    /// Named entities decoded on import; unknown ones ("&amph;") survive verbatim rather
+    /// than mangling the text. One regex pass means "&amp;lt;" decodes to "&lt;", never further.
     private static let entityNames: [String: String] = [
         "amp": "&", "lt": "<", "gt": ">", "quot": "\"", "apos": "'", "nbsp": "\u{A0}",
         "copy": "©", "reg": "®", "trade": "™", "hellip": "…", "mdash": "—", "ndash": "–",

@@ -1,11 +1,12 @@
 import AppKit
-import Combine
 import Foundation
+import Observation
 
-// GitHub release check: silent at launch (throttled to once a day), chatty
-// when the user picks the menu item. Probes inject the fetch, clock, and store.
+// GitHub release check: silent at launch (throttled to once a day), chatty when the
+// user picks the menu item. The fetch, clock, and store are injectable for tests.
 @MainActor
-final class UpdateChecker: ObservableObject {
+@Observable
+final class UpdateChecker {
     enum Prompt: Equatable {
         case available(version: String, notes: String)
         case upToDate
@@ -56,11 +57,11 @@ final class UpdateChecker: ObservableObject {
     private static let lastCheckKey = "UpdateChecker.lastCheck"
     private static let skippedVersionKey = "UpdateChecker.skippedVersion"
 
-    @Published var prompt: Prompt?
+    var prompt: Prompt?
 
     var latestRelease: () async throws -> Release = { try await fetch() }
     // Saves the DMG to ~/Downloads (system folder prompt on first use) and
-    // returns the local file; probes inject both halves of the download.
+    // returns the local file; both halves are injectable for tests.
     var downloadRelease: (URL, String) async throws -> URL = { url, name in
         try await defaultDownload(url, name)
     }

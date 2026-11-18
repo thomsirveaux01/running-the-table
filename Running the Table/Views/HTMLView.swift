@@ -12,8 +12,7 @@ struct HTMLView: View {
         Self.liveContent(viewModel)
     }
 
-    // Explicit foreground color: attributed strings lacking it render black
-    // in dark mode.
+    // Explicit foreground color: attributed strings lacking it render black in dark mode.
     static func liveContent(_ viewModel: TableViewModel) -> NSAttributedString {
         NSAttributedString(string: viewModel.htmlText,
                            attributes: NSTextViewRepresentable.baseAttributes(font: editorFont))
