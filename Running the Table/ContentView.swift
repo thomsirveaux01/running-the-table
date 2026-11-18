@@ -6,30 +6,11 @@ struct ContentView: View {
     // Defaulted so test harnesses can host ContentView without owning one.
     var updater: UpdateChecker = UpdateChecker()
     @Bindable var library: LibraryCoordinator = LibraryCoordinator()
-    // Custom toggle instead of the system one: SwiftUI parks the system toggle
-    // behind a flexible space, so it slides on every collapse.
-    @State private var columnVisibility: NavigationSplitViewVisibility = .all
-
     var body: some View {
-        NavigationSplitView(columnVisibility: $columnVisibility, sidebar: {
+        // Stock system toggle, not a custom one: it's what lets the sidebar
+        // run full-height (the ACP Toaster look).
+        NavigationSplitView(sidebar: {
             SidebarView(viewModel: viewModel)
-                // A sidebar navigationTitle makes the system re-insert its toggle.
-                .toolbar(removing: .sidebarToggle)
-                .toolbar {
-                    ToolbarItem(placement: .automatic) {
-                        Button {
-                            withAnimation {
-                                columnVisibility = columnVisibility == .detailOnly ? .all : .detailOnly
-                            }
-                        } label: {
-                            Image(systemName: "sidebar.left")
-                        }
-                        .keyboardShortcut("s", modifiers: [.control, .command])
-                        .help("Show or hide the sidebar (Ctrl+Cmd+S)")
-                        .accessibilityLabel("Toggle Sidebar")
-                    }
-                }
-                // Must trail the .toolbar modifiers (see facts).
                 .navigationSplitViewColumnWidth(min: 180, ideal: 200, max: 320)
         }, detail: {
             if viewModel.selectedDocumentID != nil {
@@ -39,8 +20,6 @@ struct ContentView: View {
                 emptyState
             }
         })
-        // Opaque toolbar surface so sidebar material doesn't reach the title bar.
-        .toolbarBackground(Color(nsColor: .windowBackgroundColor), for: .windowToolbar)
         // Root-level sheets: the save prompt opens from the sidebar menu too,
         // where EditorView may not be on screen.
         .sheet(isPresented: $viewModel.showTemplatePrompt) {

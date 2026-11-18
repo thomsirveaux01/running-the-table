@@ -58,30 +58,6 @@ enum GridKeyAction {
     case clearFocus
 }
 
-/// The learned rectangle Tab/Enter wrap inside. It starts at the first focused
-/// cell and grows as the user navigates, so a two-column working area wraps at
-/// its own edges rather than the table's.
-struct WorkRange {
-    var top: Int
-    var bottom: Int
-    var left: Int
-    var right: Int
-
-    init(_ cell: GridCell) {
-        top = cell.row
-        bottom = cell.row
-        left = cell.column
-        right = cell.column
-    }
-
-    mutating func grow(to cell: GridCell) {
-        top = min(top, cell.row)
-        bottom = max(bottom, cell.row)
-        left = min(left, cell.column)
-        right = max(right, cell.column)
-    }
-}
-
 @MainActor
 @Observable
 final class TableViewModel {
@@ -114,8 +90,6 @@ final class TableViewModel {
     /// Selected = the cell is highlighted with no caret; editing = the caret is live.
     /// Observed: placeEditor reads it to decide whether to park a caret.
     var cellMode: CellMode = .selected
-    /// The learned Tab/Enter wrap rectangle; nil until the first navigation.
-    @ObservationIgnored var workRange: WorkRange?
     /// The column a Tab series started from; Enter returns here, one row down.
     @ObservationIgnored var tabOriginCol: Int?
 
@@ -564,36 +538,35 @@ final class TableViewModel {
         }
     }
 
-    /// Moves focus with spreadsheet wrapping inside the learned work range.
+    /// Moves focus with spreadsheet wrapping at the table's edges.
     /// Tab/Shift-Tab walk a row, stepping to the next/previous row at its edges;
     /// Enter/Shift-Enter walk a column, returning to the Tab series' origin
-    /// column when one is active. The range grows to every visited cell and is
-    /// clamped to the table's real bounds.
+    /// column when one is active.
     func moveFocus(from cell: GridCell, dx: Int = 0, dy: Int = 0,
                    tab: Int = 0, enter: Int = 0) {
         guard !table.rows.isEmpty else { return }
         cellSelection = nil
-        var range = workRange ?? WorkRange(cell)
         var row = min(max(cell.row, 0), table.rows.count - 1)
         var col = min(max(cell.column, 0), max(table.rows[row].count - 1, 0))
+        let lastCol = max(table.rows[row].count - 1, 0)
 
         if tab != 0 {
             if tab > 0 {
                 // A forward Tab starts (or continues) a series from this column.
                 if tabOriginCol == nil { tabOriginCol = col }
-                if col < range.right {
+                if col < lastCol {
                     col += 1
                 } else {
                     row += 1
-                    col = range.left
+                    col = 0
                 }
             } else {
                 // Shift-Tab walks left; at the left edge it steps up a row.
-                if col > range.left {
+                if col > 0 {
                     col -= 1
                 } else {
                     row -= 1
-                    col = range.right
+                    col = lastCol
                 }
             }
         } else if enter != 0 {
@@ -609,19 +582,15 @@ final class TableViewModel {
             col += dx
         }
 
-        // Clamp to the real table (the range may outlive a structural change).
+        // Clamp to the real table (rows may be ragged after a structural change).
         row = min(max(row, 0), table.rows.count - 1)
         col = min(max(col, 0), max(table.rows[row].count - 1, 0))
-        let dest = GridCell(row: row, column: col)
-        range.grow(to: dest)
-        workRange = range
-        focusedCell = dest
+        focusedCell = GridCell(row: row, column: col)
     }
 
-    /// Drops the learned navigation state. Called on a click, a document
-    /// switch, and undo/redo so a fresh start wraps from the new cell.
+    /// Drops the active Tab series. Called on a click, a document switch, and
+    /// undo/redo so Enter doesn't return to a stale origin column.
     func resetNavigation() {
-        workRange = nil
         tabOriginCol = nil
     }
 
