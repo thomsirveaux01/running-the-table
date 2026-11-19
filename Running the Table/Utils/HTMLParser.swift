@@ -585,6 +585,28 @@ enum HTMLParser {
         NSAttributedString(string: text, attributes: cellAttributes(bold: false, italic: false, link: nil))
     }
 
+    // Pasteboard rich text (Excel, Numbers, Safari) arrives as thousands of adjacent
+    // runs; re-express it in the cell attribute model so per-run passes stay cheap.
+    // Nil when the content already has few runs.
+    static func normalizedCellContent(_ s: NSAttributedString) -> NSAttributedString? {
+        var runs = 0
+        s.enumerateAttributes(in: NSRange(location: 0, length: s.length)) { _, _, stop in
+            runs += 1
+            if runs > 32 { stop.pointee = true }
+        }
+        guard runs > 32 else { return nil }
+        let out = NSMutableAttributedString()
+        let ns = s.string as NSString
+        s.enumerateAttributes(in: NSRange(location: 0, length: s.length)) { attrs, range, _ in
+            let traits = (attrs[.font] as? NSFont)?.fontDescriptor.symbolicTraits ?? []
+            out.append(NSAttributedString(string: ns.substring(with: range),
+                                          attributes: cellAttributes(bold: traits.contains(.bold),
+                                                                    italic: traits.contains(.italic),
+                                                                    link: attrs[.link] as? URL)))
+        }
+        return out
+    }
+
     // MARK: - Entities
 
     /// Named entities decoded on import; unknown ones ("&amph;") survive verbatim rather

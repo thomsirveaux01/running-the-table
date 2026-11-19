@@ -1289,8 +1289,8 @@ final class TableViewModel {
         return [(row: f.row, col: f.column, range: range)]
     }
 
-    // NSFont has no .weight/.symbolicTraits in this SDK and the trait-mask
-    // types aren't nameable, so NSFontManager does the arithmetic.
+    // The manager applies the trait (convert); the per-run "has the trait"
+    // check is fontHasTrait, which reads the descriptor's symbolic traits.
     private func applyTraitToggle(name: String, trait: NSFontTraitMask,
                                   _ transform: (NSFont, NSFontManager, Bool) -> NSFont) {
         let targets = formattingCells()
@@ -1299,12 +1299,7 @@ final class TableViewModel {
         // when every targeted character already has it; otherwise apply it.
         let remove = multi && targets.allSatisfy { target in
             guard let c = cell(row: target.row, col: target.col), target.range.length > 0 else { return true }
-            var all = true
-            c.content.enumerateAttribute(.font, in: target.range) { value, _, _ in
-                let font = (value as? NSFont) ?? NSFont.systemFont(ofSize: NSFont.systemFontSize)
-                if !NSFontManager.shared.traits(of: font).contains(trait) { all = false }
-            }
-            return all
+            return contentHasTrait(c.content, in: target.range, trait)
         }
         guard targets.contains(where: { $0.range.length > 0 }) else { return }
         performUndoable(name) {
@@ -1316,7 +1311,7 @@ final class TableViewModel {
                 mutable.enumerateAttribute(.font, in: target.range) { value, subRange, _ in
                     let font = (value as? NSFont) ?? NSFont.systemFont(ofSize: NSFont.systemFontSize)
                     // A single cell toggles per run; a multi-cell selection applies the one decision.
-                    let flip = multi ? remove : manager.traits(of: font).contains(trait)
+                    let flip = multi ? remove : self.fontHasTrait(font, trait)
                     mutable.addAttribute(.font, value: transform(font, manager, flip), range: subRange)
                 }
                 self.table.rows[target.row][target.col].content = mutable
@@ -1355,18 +1350,38 @@ final class TableViewModel {
         return targets.allSatisfy { self.cell(row: $0.row, col: $0.col)?.isHeader ?? false }
     }
 
+    // The two traits the toolbar uses, read off the font descriptor's symbolic
+    // traits — NSFontManager.traits(of:) is ~5x slower per run, and this runs
+    // once per run on every body pass.
+    private func fontHasTrait(_ font: NSFont, _ trait: NSFontTraitMask) -> Bool {
+        let symbolic = font.fontDescriptor.symbolicTraits
+        if trait == .boldFontMask { return symbolic.contains(.bold) }
+        if trait == .italicFontMask { return symbolic.contains(.italic) }
+        return NSFontManager.shared.traits(of: font).contains(trait)
+    }
+
+    // True when every run in the range carries the trait; stops at the first
+    // run that lacks it so a many-run cell can't stall a body pass.
+    private func contentHasTrait(_ content: NSAttributedString, in range: NSRange, _ trait: NSFontTraitMask) -> Bool {
+        guard range.length > 0 else { return false }
+        var all = true
+        content.enumerateAttribute(.font, in: range) { value, _, stop in
+            let font = (value as? NSFont) ?? NSFont.systemFont(ofSize: NSFont.systemFontSize)
+            if !self.fontHasTrait(font, trait) {
+                all = false
+                stop.pointee = true
+            }
+        }
+        return all
+    }
+
     // Toolbar toggles read "on" only when every character of every targeted cell already carries the trait.
     private func selectionHasTrait(_ trait: NSFontTraitMask) -> Bool {
         let targets = formattingCells().filter { $0.range.length > 0 }
         guard !targets.isEmpty else { return false }
         for target in targets {
             guard let c = cell(row: target.row, col: target.col) else { continue }
-            var all = true
-            c.content.enumerateAttribute(.font, in: target.range) { value, _, _ in
-                let font = (value as? NSFont) ?? NSFont.systemFont(ofSize: NSFont.systemFontSize)
-                if !NSFontManager.shared.traits(of: font).contains(trait) { all = false }
-            }
-            if !all { return false }
+            if !contentHasTrait(c.content, in: target.range, trait) { return false }
         }
         return true
     }

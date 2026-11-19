@@ -632,9 +632,19 @@ struct NSTextViewRepresentable: NSViewRepresentable {
             guard !applyingProgrammaticContent else { return }
             guard let textView = notification.object as? NSTextView,
                   let storage = textView.textStorage else { return }
+            var content = NSAttributedString(attributedString: storage)
+            // Run-heavy pastes (spreadsheet apps) stall per-run formatting passes;
+            // re-express them in the cell attribute model and re-pin typing.
+            if !parent.highlightsSyntax, let normalized = HTMLParser.normalizedCellContent(content) {
+                applyingProgrammaticContent = true
+                textView.textStorage?.setAttributedString(normalized)
+                applyingProgrammaticContent = false
+                textView.typingAttributes = NSTextViewRepresentable.baseAttributes(font: parent.font)
+                content = normalized
+            }
             // Keep the model's content style-free; alignment lives in
             // cell.alignment, not in the content's paragraph style.
-            parent.onTextChange(Self.strippingParagraphStyle(NSAttributedString(attributedString: storage)))
+            parent.onTextChange(Self.strippingParagraphStyle(content))
             refreshDecorations(textView)
         }
 
