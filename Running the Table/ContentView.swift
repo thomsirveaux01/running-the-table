@@ -57,7 +57,7 @@ struct ContentView: View {
             Text("The app can no longer reach \(lostPath). Re-select it to keep your tables there, or fall back to the app's container.")
         }
         .sheet(isPresented: $library.showSettings) {
-            LibrarySettingsView(library: library)
+            LibrarySettingsView(library: library, updater: updater)
         }
         .sheet(isPresented: moveShown) {
             libraryChoiceSheet(title: "Move Your Tables?",
