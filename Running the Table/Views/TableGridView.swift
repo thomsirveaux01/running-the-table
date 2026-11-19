@@ -343,6 +343,39 @@ final class GridDocumentView: NSView {
         }
     }
 
+    // MARK: - Select-mode edit actions
+
+    // In select mode the grid is first responder (no caret), so the Edit menu's
+    // copy:/cut:/paste: land here. A block copies as a table; a lone cell as content.
+    @objc func copy(_ sender: Any?) {
+        guard let viewModel = coordinator?.viewModel else { return }
+        if viewModel.cellSelection != nil {
+            _ = viewModel.copySelectedCells()
+        } else {
+            _ = viewModel.copyFocusedCellContent()
+        }
+    }
+
+    @objc func cut(_ sender: Any?) {
+        guard let viewModel = coordinator?.viewModel else { return }
+        if viewModel.cellSelection != nil {
+            _ = viewModel.cutSelectedCells()
+        } else {
+            _ = viewModel.cutFocusedCellContent()
+        }
+    }
+
+    @objc func paste(_ sender: Any?) {
+        guard let viewModel = coordinator?.viewModel else { return }
+        // A table on the pasteboard merges into this table at the focused cell;
+        // with no cell focused it still promotes to its own document.
+        if viewModel.pasteTableIntoCurrentTable() { return }
+        if viewModel.pasteTableFromPasteboardIfTable() { return }
+        if let f = viewModel.focusedCell {
+            viewModel.pasteStringIntoCell(f)
+        }
+    }
+
     private var geometry: GridGeometry? {
         guard let coordinator else { return nil }
         return GridGeometry(viewModel: coordinator.viewModel)

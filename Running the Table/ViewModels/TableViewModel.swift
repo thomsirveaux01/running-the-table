@@ -2154,6 +2154,135 @@ final class TableViewModel {
         return true
     }
 
+    /// ⌘C on a lone selected cell (no block) copies it as a 1×1 HTML table, so a
+    /// paste lands it back in a grid with header-ness, spans, and rich text intact.
+    func copyFocusedCellContent() -> Bool {
+        guard let f = focusedCell, let p = placement(of: f) else { return false }
+        let sel = VisualCellRange(rowStart: f.row, rowEnd: f.row,
+                                  colStart: p.startCol, colEnd: p.startCol + p.colSpan - 1)
+        let sub = subtable(of: sel)
+        guard !sub.rows.isEmpty else { return false }
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(HTMLGenerator.html(for: sub), forType: .html)
+        pasteboard.setString(sub.rows.map { row in row.map(\.plainString).joined(separator: "\t") }
+                                  .joined(separator: "\n"), forType: .string)
+        return true
+    }
+
+    /// ⌘X on a lone selected cell: copy its content, then empty it (one undo step).
+    func cutFocusedCellContent() -> Bool {
+        guard let f = focusedCell else { return false }
+        guard copyFocusedCellContent() else { return false }
+        clearSingleCellContent(f)
+        return true
+    }
+
+    /// ⌘X across a cell block: copy it as a table, then empty every cell it touches.
+    @discardableResult
+    func cutSelectedCells() -> Bool {
+        guard copySelectedCells() else { return false }
+        if !clearSelectedCells(), let f = focusedCell {
+            // A one-cell block: clearSelectedCells needs >1, so clear it as a lone cell.
+            clearSingleCellContent(f)
+        }
+        return true
+    }
+
+    /// ⌘V on a lone selected cell replaces its content with the pasteboard's text.
+    func pasteStringIntoCell(_ cell: GridCell) {
+        guard let text = NSPasteboard.general.string(forType: .string),
+              !text.isEmpty else { return }
+        performUndoable("Paste") {
+            guard var c = self.cell(row: cell.row, col: cell.column) else { return }
+            c.content = NSAttributedString(string: text)
+            c.rawInnerHTML = nil
+            self.table.rows[cell.row][cell.column] = c
+            self.growRowIfNeeded(cell.row)
+            self.flushToDocument()
+            self.regenerateHTML()
+        }
+    }
+
+    /// ⌘V with a cell focused: an HTML table on the pasteboard is merged into the
+    /// current table at that cell, growing it as needed. True when a table was pasted.
+    func pasteTableIntoCurrentTable() -> Bool {
+        guard let f = focusedCell,
+              let html = NSPasteboard.general.string(forType: .html),
+              html.range(of: "<table", options: .caseInsensitive) != nil else { return false }
+        let pasted = Table.loaded(from: HTMLParser.parseTable(html), name: "Pasted")
+        guard !pasted.rows.isEmpty else { return false }
+        performUndoable("Paste") {
+            self.mergePastedTable(pasted, at: f)
+            self.table.normalize()
+            self.ensureSizing()
+            for row in f.row..<min(f.row + pasted.rows.count, self.table.rows.count) {
+                self.growRowIfNeeded(row)
+            }
+            self.flushToDocument()
+            self.regenerateHTML()
+        }
+        return true
+    }
+
+    /// Splice a parsed table into the live one anchored on a cell: grow rows and
+    /// columns to fit, then overwrite each pasted cell's target, keeping spans,
+    /// header-ness, alignment, and rich text.
+    private func mergePastedTable(_ pasted: Table, at origin: GridCell) {
+        guard let op = placement(of: origin) else { return }
+        let vr = origin.row
+        let vc = op.startCol
+        let pRows = pasted.rows.count
+        let pCols = pasted.columnCount
+
+        // Grow rows so the whole block fits below the anchor.
+        while table.rows.count < vr + pRows {
+            table.rows.append(TableRow(cells: Array(repeating: TableCell(), count: max(table.columnCount, 1))))
+        }
+        // Grow columns so the block fits to the right of the anchor.
+        while table.columnCount < vc + pCols {
+            for row in table.rows.indices {
+                table.rows[row].cells.append(TableCell(isHeader: table.rows[row].allHeaders))
+            }
+        }
+        table.normalize()
+
+        // Overwrite each pasted cell at its target visual position.
+        for (i, rowSlots) in pasted.placements().enumerated() {
+            for p in rowSlots {
+                let hr = vr + i
+                let hc = vc + p.startCol
+                guard hr < table.rows.count, hc < table.columnCount,
+                      let hostIdx = hostCellIndexAtVisual(row: hr, col: hc) else { continue }
+                let src = pasted.rows[i][p.cellIndex]
+                var dst = table.rows[hr][hostIdx]
+                dst.content = src.content
+                dst.rawInnerHTML = src.rawInnerHTML
+                dst.colspan = src.colspan
+                dst.rowspan = src.rowspan
+                dst.isHeader = src.isHeader
+                dst.alignment = src.alignment
+                dst.rawAttributes = src.rawAttributes
+                table.rows[hr][hostIdx] = dst
+            }
+        }
+
+        // A host row that is now nothing but header cells earns its <thead>.
+        for hr in vr..<(vr + pRows) where hr < table.rows.count {
+            if table.rows[hr].allHeaders { table.rows[hr].section = .head }
+        }
+    }
+
+    /// The array index of the cell that visually starts at (row, col); when a rowspan
+    /// from above claims the position, the covering cell is overwritten instead.
+    private func hostCellIndexAtVisual(row: Int, col: Int) -> Int? {
+        guard row < table.rows.count else { return nil }
+        if let p = table.placements()[row].first(where: { $0.startCol == col }) {
+            return p.cellIndex
+        }
+        return table.cellCovering(row: row, col: col)?.cell
+    }
+
     /// ⌘V inside a cell: a real HTML table on the clipboard (what copySelectedCells writes)
     /// is promoted to its own document, not flattened into the cell. Plain text still pastes.
     func pasteTableFromPasteboardIfTable() -> Bool {
