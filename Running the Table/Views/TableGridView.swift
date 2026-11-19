@@ -223,6 +223,61 @@ final class GridCellClipView: NSView {
     }
 }
 
+/// One cell rendered as its own layer-backed view, so a move-drag can animate
+/// its frame with `animator()` instead of teleporting the shared draw pass.
+/// Text is painted through the document view's shared TextKit stack so drawn
+/// and edited cells keep landing identically.
+final class GridCellView: NSView {
+    override var isFlipped: Bool { true }
+    weak var documentView: GridDocumentView?
+
+    var content: NSAttributedString = NSAttributedString() {
+        didSet { if content != oldValue { needsDisplay = true } }
+    }
+    var alignment: NSTextAlignment = .left {
+        didSet { if alignment != oldValue { needsDisplay = true } }
+    }
+    var isHeader = false {
+        didSet { if isHeader != oldValue { needsDisplay = true } }
+    }
+    // The editor paints the focused cell's text; drawing it here too would
+    // double-render (and force layout while typing).
+    var isFocused = false {
+        didSet { if isFocused != oldValue { needsDisplay = true } }
+    }
+    // While a drag range is up, the range border is the only selector.
+    var isRangeActive = false {
+        didSet { if isRangeActive != oldValue { needsDisplay = true } }
+    }
+    // The dragged column's cells fade; alphaValue covers the whole cell.
+    var isLifted = false {
+        didSet { if isLifted != oldValue { alphaValue = isLifted ? 0.5 : 1.0 } }
+    }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let rect = bounds
+        NSTextViewRepresentable.background(isHeader: isHeader).setFill()
+        rect.fill()
+        if !isFocused {
+            documentView?.drawCellText(content, alignment: alignment, in: rect)
+        }
+        let showRing = isFocused && !isRangeActive
+        let borderW: CGFloat = showRing ? 2 : 1
+        (showRing ? NSColor.controlAccentColor : NSColor.separatorColor).setStroke()
+        let half = borderW / 2
+        let path = NSBezierPath(rect: rect.insetBy(dx: half, dy: half))
+        path.lineWidth = borderW
+        path.stroke()
+    }
+}
+
 /// Move-handle glyphs, cached by tint and appearance: building a configured SF
 /// Symbol inside draw() re-runs CoreSVG instantiation per handle per redraw. Main-thread only.
 enum MoveHandleSymbol {
@@ -319,14 +374,11 @@ final class GridDocumentView: NSView {
         return container
     }()
 
-    // Last-drawn state, so sync() dirties only real changes instead of the whole grid on every keystroke.
+    // One layer-backed view per cell placement; syncCellViews() keeps the set
+    // in step with the model and positions each at its cellRect.
+    private var cellViews: [GridCell: GridCellView] = [:]
+    // Last-synced content per cell, kept for the debugDrawnText() hook.
     private var drawnContents: [GridCell: NSAttributedString] = [:]
-    private var drawnStyles: [GridCell: NSTextAlignment] = [:]
-    private var drawnHeaderFlags: [GridCell: Bool] = [:]
-    private var drawnFrames: [GridCell: NSRect] = [:]
-    private var drawnLayoutKey = -1
-    private var drawnFocused: GridCell?
-    private var drawnRangeActive = false
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -341,53 +393,22 @@ final class GridDocumentView: NSView {
     override func draw(_ dirtyRect: NSRect) {
         let geom = geometry
         // The padded container's separator tint shows through every 1pt gap;
-        // the top-left corner box (and caption gutter) is control-colored.
+        // the top-left corner box (and caption gutter) is control-colored. The
+        // cells themselves are GridCellView subviews painted on top of this.
         NSColor.controlBackgroundColor.setFill()
         bounds.fill()
-        guard let geom, let coordinator else { return }
+        guard let geom else { return }
         NSColor.separatorColor.setFill()
         NSRect(origin: .zero, size: geom.blockSize).fill()
         NSColor.controlBackgroundColor.setFill()
         NSRect(x: 0, y: 0, width: geom.gridLeftEdge, height: geom.gridTopEdge).fill()
-
-        let viewModel = coordinator.viewModel
-        let focused = viewModel.focusedCell
-        for (row, slots) in viewModel.cachedPlacements.enumerated() {
-            for p in slots {
-                let cellKey = GridCell(row: row, column: p.cellIndex)
-                let rect = geom.cellRect(row: row, placement: p, coordinator: coordinator)
-                guard rect.intersects(dirtyRect),
-                      let cell = viewModel.cell(row: row, col: p.cellIndex) else { continue }
-                let isFocused = focused == cellKey
-                let lifted = coordinator.columnDrag.dragged == p.startCol
-                if lifted { NSGraphicsContext.saveGraphicsState() }
-                if lifted { NSGraphicsContext.current?.cgContext.setAlpha(0.5) }
-
-                NSTextViewRepresentable.background(isHeader: cell.isHeader).setFill()
-                rect.fill()
-                // The editor paints the focused cell's text; drawing it here
-                // too would double-render (and force layout while typing).
-                if !isFocused {
-                    drawCellText(cell.content, alignment: cell.alignment, in: rect)
-                }
-                // While a drag range is up, the range border is the only
-                // selector; the drag-origin cell keeps no ring of its own.
-                let showRing = isFocused && viewModel.cellSelection == nil
-                let borderW: CGFloat = showRing ? 2 : 1
-                (showRing ? NSColor.controlAccentColor : NSColor.separatorColor).setStroke()
-                let half = borderW / 2
-                let path = NSBezierPath(rect: rect.insetBy(dx: half, dy: half))
-                path.lineWidth = borderW
-                path.stroke()
-
-                if lifted { NSGraphicsContext.restoreGraphicsState() }
-            }
-        }
     }
 
     /// Lays out one cell's text in the shared stack and paints it clipped to
-    /// the slot, at the editor's exact container origin.
-    private func drawCellText(_ content: NSAttributedString, alignment: NSTextAlignment, in rect: NSRect) {
+    /// the slot, at the editor's exact container origin. Called from each
+    /// GridCellView's draw pass, so the shared stack is touched only on the
+    /// main thread, one cell at a time.
+    func drawCellText(_ content: NSAttributedString, alignment: NSTextAlignment, in rect: NSRect) {
         guard content.length > 0 else { return }
         let inset = Self.textInset
         let styled = NSMutableAttributedString(attributedString: content)
@@ -418,56 +439,7 @@ final class GridDocumentView: NSView {
         let geom = GridGeometry(viewModel: viewModel)
         if frame.size != geom.blockSize { setFrameSize(geom.blockSize) }
 
-        let key = layoutKey(geom: geom, coordinator: coordinator)
-        var fullRedraw = key != drawnLayoutKey
-        if fullRedraw { drawnLayoutKey = key }
-
-        var contents: [GridCell: NSAttributedString] = [:]
-        var styles: [GridCell: NSTextAlignment] = [:]
-        var headers: [GridCell: Bool] = [:]
-        var frames: [GridCell: NSRect] = [:]
-        for (row, slots) in viewModel.cachedPlacements.enumerated() {
-            for p in slots {
-                let cellKey = GridCell(row: row, column: p.cellIndex)
-                guard let cell = viewModel.cell(row: row, col: p.cellIndex) else { continue }
-                contents[cellKey] = cell.content
-                styles[cellKey] = cell.alignment
-                headers[cellKey] = cell.isHeader
-                frames[cellKey] = geom.cellRect(row: row, placement: p, coordinator: coordinator)
-            }
-        }
-        if !fullRedraw {
-            if Set(contents.keys) != Set(drawnContents.keys) {
-                fullRedraw = true
-            } else {
-                for (cellKey, content) in contents where
-                    drawnContents[cellKey]?.isEqual(to: content) != true
-                    || drawnStyles[cellKey] != styles[cellKey]
-                    || drawnHeaderFlags[cellKey] != headers[cellKey]
-                    || drawnFrames[cellKey] != frames[cellKey] {
-                    if let old = drawnFrames[cellKey] { setNeedsDisplay(old) }
-                    if let fresh = frames[cellKey] { setNeedsDisplay(fresh) }
-                }
-                // Focus moves repaint both ends: the cell the editor left
-                // must regain its drawn text, and both borders change.
-                if let previous = drawnFocused, previous != viewModel.focusedCell,
-                   let rect = frames[previous] ?? drawnFrames[previous] { setNeedsDisplay(rect) }
-                if let focus = viewModel.focusedCell, focus != drawnFocused,
-                   let rect = frames[focus] { setNeedsDisplay(rect) }
-                // Toggling the drag range swaps the origin cell between its
-                // accent ring and the plain separator border.
-                if (viewModel.cellSelection != nil) != drawnRangeActive,
-                   let focus = viewModel.focusedCell,
-                   let rect = frames[focus] ?? drawnFrames[focus] { setNeedsDisplay(rect) }
-            }
-        }
-        drawnContents = contents
-        drawnStyles = styles
-        drawnHeaderFlags = headers
-        drawnFrames = frames
-        drawnFocused = viewModel.focusedCell
-        drawnRangeActive = viewModel.cellSelection != nil
-        if fullRedraw { needsDisplay = true }
+        syncCellViews(geom: geom, viewModel: viewModel, coordinator: coordinator)
 
         placeEditor(geom: geom, coordinator: coordinator)
         syncCaption(geom: geom, viewModel: viewModel, coordinator: coordinator)
@@ -479,16 +451,45 @@ final class GridDocumentView: NSView {
         restoreStackingOrder()
     }
 
-    /// Quantized fingerprint of everything that repaints every cell at once: column/row
-    /// sizes, the caption band, and live drag offsets. Content and focus are per-cell.
-    private func layoutKey(geom: GridGeometry, coordinator: GridCoordinator) -> Int {
-        var key = Int(geom.captionBandHeight * 4)
-        for h in coordinator.viewModel.rowHeights { key = key &* 31 &+ Int(h * 4) }
-        for w in coordinator.viewModel.columnWidths { key = key &* 31 &+ Int(w * 4) }
-        key = key &* 31 &+ Int(coordinator.rowDrag.settleOffset * 4)
-        key = key &* 31 &+ Int(coordinator.columnDrag.settleOffset * 4)
-        key = key &* 31 &+ (coordinator.columnDrag.dragged ?? -1)
-        return key
+    /// Keeps one GridCellView per placement in step with the model: creates and
+    /// removes views as the shape changes, re-points content/focus/lift, and
+    /// repositions each at its cellRect. Property setters redraw only real
+    /// changes, so a keystroke touches one view, not the whole grid.
+    @MainActor
+    private func syncCellViews(geom: GridGeometry, viewModel: TableViewModel, coordinator: GridCoordinator) {
+        let focused = viewModel.focusedCell
+        let rangeActive = viewModel.cellSelection != nil
+        let liftedCol = coordinator.columnDrag.dragged
+        var seen: Set<GridCell> = []
+        var contents: [GridCell: NSAttributedString] = [:]
+        for (row, slots) in viewModel.cachedPlacements.enumerated() {
+            for p in slots {
+                let cellKey = GridCell(row: row, column: p.cellIndex)
+                seen.insert(cellKey)
+                let view = cellViews[cellKey] ?? {
+                    let v = GridCellView(frame: .zero)
+                    v.documentView = self
+                    addSubview(v)
+                    cellViews[cellKey] = v
+                    return v
+                }()
+                let rect = geom.cellRect(row: row, placement: p, coordinator: coordinator)
+                if view.frame != rect { view.frame = rect }
+                guard let cell = viewModel.cell(row: row, col: p.cellIndex) else { continue }
+                view.content = cell.content
+                view.alignment = cell.alignment
+                view.isHeader = cell.isHeader
+                view.isFocused = focused == cellKey
+                view.isRangeActive = rangeActive
+                view.isLifted = (liftedCol == p.startCol)
+                contents[cellKey] = cell.content
+            }
+        }
+        for (key, view) in cellViews where !seen.contains(key) {
+            view.removeFromSuperview()
+            cellViews.removeValue(forKey: key)
+        }
+        drawnContents = contents
     }
 
     // MARK: - Editor placement
@@ -886,33 +887,41 @@ final class GridDocumentView: NSView {
     private func syncGapHighlights(geom: GridGeometry, coordinator: GridCoordinator) {
         let viewModel = coordinator.viewModel
         if let source = coordinator.rowDrag.dragged, let target = coordinator.rowDrag.target, target != source {
+            let wasVisible = coordinator.rowGapHighlight.map { !$0.isHidden } ?? false
             let view = coordinator.rowGapHighlight ?? {
                 let v = GapHighlightView()
                 coordinator.rowGapHighlight = v
                 addSubview(v)
                 return v
             }()
-            view.frame = NSRect(x: WYSIWYGView.divider,
-                                y: WYSIWYGView.slotTop(source: source, target: target, rowHeights: viewModel.rowHeights)
-                                    + WYSIWYGView.columnGutterHeight + WYSIWYGView.divider + geom.captionBandHeight,
-                                width: WYSIWYGView.gutterWidth + WYSIWYGView.divider + geom.gridColumnsWidth,
-                                height: geom.rowHeight(source) + WYSIWYGView.divider)
+            let frame = NSRect(x: WYSIWYGView.divider,
+                               y: WYSIWYGView.slotTop(source: source, target: target, rowHeights: viewModel.rowHeights)
+                                   + WYSIWYGView.columnGutterHeight + WYSIWYGView.divider + geom.captionBandHeight,
+                               width: WYSIWYGView.gutterWidth + WYSIWYGView.divider + geom.gridColumnsWidth,
+                               height: geom.rowHeight(source) + WYSIWYGView.divider)
+            // Glide to the new slot when it's already on screen so it tracks
+            // the path rows; place it directly on first show.
+            if wasVisible { view.setFrameSize(frame.size); glide(view, toOrigin: frame.origin) }
+            else { view.frame = frame }
             view.isHidden = false
         } else {
             coordinator.rowGapHighlight?.isHidden = true
         }
         if let source = coordinator.columnDrag.dragged, let target = coordinator.columnDrag.target, target != source {
+            let wasVisible = coordinator.columnGapHighlight.map { !$0.isHidden } ?? false
             let view = coordinator.columnGapHighlight ?? {
                 let v = GapHighlightView()
                 coordinator.columnGapHighlight = v
                 addSubview(v)
                 return v
             }()
-            view.frame = NSRect(x: geom.gridLeftEdge - WYSIWYGView.divider
+            let frame = NSRect(x: geom.gridLeftEdge - WYSIWYGView.divider
                                     + WYSIWYGView.slotLeft(source: source, target: target, widths: viewModel.columnWidths),
                                 y: WYSIWYGView.divider,
                                 width: geom.columnWidth(source) + WYSIWYGView.divider,
                                 height: WYSIWYGView.columnGutterHeight + geom.captionBandHeight + geom.gridHeight)
+            if wasVisible { view.setFrameSize(frame.size); glide(view, toOrigin: frame.origin) }
+            else { view.frame = frame }
             view.isHidden = false
         } else {
             coordinator.columnGapHighlight?.isHidden = true
@@ -940,6 +949,9 @@ final class GridDocumentView: NSView {
     /// selection border on top; re-adding an existing subview moves it front.
     private func restoreStackingOrder() {
         guard let coordinator else { return }
+        // The cell views sit at the bottom; the editor clip must paint the
+        // focused cell's text on top of them, then the gutters and overlays.
+        addSubview(editorClip)
         for (_, strip) in coordinator.rowStrips { addSubview(strip) }
         for (_, strip) in coordinator.columnStrips { addSubview(strip) }
         for (_, handle) in coordinator.rowResizeHandles { addSubview(handle) }
@@ -956,30 +968,72 @@ final class GridDocumentView: NSView {
     func applyRowDragFrames(animated: Bool, coordinator: GridCoordinator) {
         guard let geom = geometry else { return }
         let viewModel = coordinator.viewModel
+        let dragged = coordinator.rowDrag.dragged
+        let isDragging = dragged != nil
+        // The grabbed row tracks the cursor directly; path rows glide so a
+        // target change retargets smoothly; the settle slot is timer-driven,
+        // so it stays direct. `animated` is legacy (all callers pass false).
+        for (row, slots) in viewModel.cachedPlacements.enumerated() {
+            for p in slots {
+                guard let view = cellViews[GridCell(row: row, column: p.cellIndex)] else { continue }
+                let rect = geom.cellRect(row: row, placement: p, coordinator: coordinator)
+                if view.frame.origin == rect.origin { continue }
+                if row == dragged || !isDragging {
+                    view.setFrameOrigin(rect.origin)
+                } else {
+                    glide(view, toOrigin: rect.origin)
+                }
+            }
+        }
         for row in 0..<viewModel.table.rows.count {
-            let offset = geom.rowOffset(row, coordinator: coordinator)
-            if let strip = coordinator.rowStrips[row] {
-                animate(strip, toY: geom.gridTopEdge + geom.localRowTop(row) + offset, animated: animated)
+            guard let strip = coordinator.rowStrips[row] else { continue }
+            let origin = NSPoint(x: strip.frame.minX,
+                                 y: geom.gridTopEdge + geom.localRowTop(row) + geom.rowOffset(row, coordinator: coordinator))
+            if strip.frame.origin == origin { continue }
+            if row == dragged || !isDragging {
+                strip.setFrameOrigin(origin)
+            } else {
+                glide(strip, toOrigin: origin)
             }
         }
         syncGapHighlights(geom: geom, coordinator: coordinator)
         placeEditor(geom: geom, coordinator: coordinator)
-        needsDisplay = true
     }
 
     @MainActor
     func applyColumnDragFrames(animated: Bool, coordinator: GridCoordinator) {
         guard let geom = geometry else { return }
         let viewModel = coordinator.viewModel
+        let dragged = coordinator.columnDrag.dragged
+        let isDragging = dragged != nil
+        // The lift fade was computed fresh in draw() before cells became
+        // subviews, so re-apply it here; sync() clears it after the drop.
+        for (row, slots) in viewModel.cachedPlacements.enumerated() {
+            for p in slots {
+                guard let view = cellViews[GridCell(row: row, column: p.cellIndex)] else { continue }
+                view.isLifted = (dragged == p.startCol)
+                let rect = geom.cellRect(row: row, placement: p, coordinator: coordinator)
+                if view.frame.origin == rect.origin { continue }
+                if p.startCol == dragged || !isDragging {
+                    view.setFrameOrigin(rect.origin)
+                } else {
+                    glide(view, toOrigin: rect.origin)
+                }
+            }
+        }
         for col in 0..<viewModel.columnWidths.count {
-            let shift = geom.columnShift(col, coordinator: coordinator)
-            if let strip = coordinator.columnStrips[col] {
-                animate(strip, toX: geom.gridLeftEdge + geom.localColumnLeft(col) + shift, animated: animated)
+            guard let strip = coordinator.columnStrips[col] else { continue }
+            let origin = NSPoint(x: geom.gridLeftEdge + geom.localColumnLeft(col) + geom.columnShift(col, coordinator: coordinator),
+                                 y: strip.frame.minY)
+            if strip.frame.origin == origin { continue }
+            if col == dragged || !isDragging {
+                strip.setFrameOrigin(origin)
+            } else {
+                glide(strip, toOrigin: origin)
             }
         }
         syncGapHighlights(geom: geom, coordinator: coordinator)
         placeEditor(geom: geom, coordinator: coordinator)
-        needsDisplay = true
     }
 
     /// Springs the settle offset home at 60 Hz: the commit relays rows instantly, so
@@ -1031,6 +1085,17 @@ final class GridDocumentView: NSView {
         }
     }
 
+    /// Glides a cell (or strip) to a new origin. Retargeting mid-glide is
+    /// smooth — AppKit animates from the presentation value, so a fast drag
+    /// crossing several rows never snaps (measured, see verified-facts.md).
+    private func glide(_ view: NSView, toOrigin: NSPoint) {
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0.18
+            ctx.allowsImplicitAnimation = true
+            view.animator().setFrameOrigin(toOrigin)
+        }
+    }
+
     override func resetCursorRects() {
         // The handle views own their cursor rects; nothing to add here.
     }
@@ -1047,6 +1112,13 @@ extension GridCoordinator {
 
 final class GapHighlightView: NSView {
     override var isFlipped: Bool { true }
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        // Layer-backed so a move-drag can glide it to the new slot with
+        // animator() (smooth retargeting needs a presentation layer).
+        wantsLayer = true
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
     override func draw(_ dirtyRect: NSRect) {
         NSColor.controlAccentColor.withAlphaComponent(0.28).setFill()
         NSBezierPath(roundedRect: bounds, xRadius: 2, yRadius: 2).fill()
