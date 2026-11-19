@@ -6,49 +6,56 @@ struct LibrarySettingsView: View {
     var updater: UpdateChecker
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Tables Folder").font(.headline)
+        VStack(alignment: .leading, spacing: 20) {
+            folderSection
+            Divider()
+            versionSection
+        }
+        .padding(.horizontal, 48)
+        .padding(.vertical, 28)
+        .frame(width: 520)
+    }
+
+    // MARK: - Tables folder
+
+    // Heading, path, and actions stack vertically; the path wraps to as many
+    // lines as needed so the whole folder is always visible.
+    private var folderSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Tables Folder:")
+                .fontWeight(.semibold)
             Text(library.currentPath)
                 .textSelection(.enabled)
                 .font(.system(.body, design: .monospaced))
-            HStack {
-                Button("Change…") { library.changeFolder() }
+                .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 8) {
                 Button("Reveal in Finder") {
                     NSWorkspace.shared.activateFileViewerSelecting([LibraryLocation.directory])
                 }
-                Spacer()
-                Button("Done") { library.showSettings = false }
-                    .keyboardShortcut(.defaultAction)
-                    .buttonStyle(.borderedProminent)
+                Button("Change…") { library.changeFolder() }
             }
-            Divider()
-            versionRow
         }
-        .padding(20)
-        .frame(width: 520)
     }
 
     // The current version, plus a caption and Download button that persist
     // after the update prompt is dismissed or skipped.
-    private var versionRow: some View {
-        HStack(alignment: .top, spacing: 12) {
-            Text("Version").font(.headline)
-            VStack(alignment: .leading, spacing: 4) {
-                HStack(spacing: 6) {
-                    Text(updater.currentVersion)
-                    if let build = Self.buildVersion {
-                        Text("· build \(build)")
-                            .foregroundStyle(.secondary)
-                    }
+    private var versionSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Version:")
+                .fontWeight(.semibold)
+            HStack(spacing: 6) {
+                Text(updater.currentVersion)
+                if let build = Self.buildVersion {
+                    Text("· build \(build)")
+                        .foregroundStyle(.secondary)
                 }
-                .lineLimit(1)
-                // Always one caption line (blank when current) so the row's
-                // height stays constant.
-                Text(updateCaption ?? " ")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
             }
-            Spacer()
+            .lineLimit(1)
+            // Always one caption line (blank when current) so the section's
+            // height stays constant.
+            Text(updateCaption ?? " ")
+                .font(.caption)
+                .foregroundStyle(.secondary)
             if updater.availableUpdate != nil {
                 Button("Download") {
                     Task { await updater.downloadAvailableUpdate() }

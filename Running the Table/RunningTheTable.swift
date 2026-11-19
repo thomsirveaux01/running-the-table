@@ -58,7 +58,7 @@ import SwiftUI
         .commands {
             RunningTheTableCommands(viewModel: viewModel, updater: updater, library: library)
         }
-        // No Settings scene by design: Settings… raises a sheet on the main
-        // window (see commands), so no stray windows.
+        // No Settings scene by design: Settings… opens a floating NSWindow of
+        // its own (see commands), so no stray SwiftUI windows.
     }
 }

@@ -209,8 +209,6 @@ final class LibraryCoordinator {
     var step: Step = .none
     var failure: String?
     private(set) var currentPath: String = LibraryLocation.directory.path
-    // Settings is a sheet on the main window, not a window of its own.
-    var showSettings = false
 
     weak var viewModel: TableViewModel?
     private var promptedThisLaunch = false
@@ -249,8 +247,8 @@ final class LibraryCoordinator {
                 self.viewModel?.reloadFromDisk()
                 return
             }
-            // The move sheet rides the same window as the Settings sheet, so Settings steps aside first.
-            self.showSettings = false
+            // The move sheet rides the main window, so the floating Settings window steps aside first.
+            SettingsWindowController.shared.window?.close()
             self.step = .moveOffer(count: count, from: current, to: chosen)
         }
     }

@@ -22,10 +22,12 @@ struct RunningTheTableCommands: Commands {
             }
         }
 
-        // Settings is an in-app sheet, so the stock window slot must raise it.
+        // Settings is a floating window of its own, so the stock slot raises it.
         CommandGroup(replacing: .appSettings) {
-            Button("Settings…") { library.showSettings = true }
-                .keyboardShortcut(",", modifiers: .command)
+            Button("Settings…") {
+                SettingsWindowController.shared.show(library: library, updater: updater)
+            }
+            .keyboardShortcut(",", modifiers: .command)
         }
 
         // ⌘N lands above the stock New Window (remapped to ⌥⌘N in App's init); a
@@ -65,6 +67,8 @@ struct RunningTheTableCommands: Commands {
             Menu("Import") {
                 Button("CSV…") { viewModel.importCSV() }
                 Button("Markdown…") { viewModel.importMarkdown() }
+                Button("Excel (.xlsx)…") { viewModel.importSpreadsheet(.xlsx) }
+                Button("OpenDocument (.ods)…") { viewModel.importSpreadsheet(.ods) }
             }
 
             Menu("Export") {

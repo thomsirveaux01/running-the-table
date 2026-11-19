@@ -570,7 +570,7 @@ enum HTMLParser {
         return font
     }
 
-    private static func cellAttributes(bold: Bool, italic: Bool, link: URL?) -> [NSAttributedString.Key: Any] {
+    static func cellAttributes(bold: Bool, italic: Bool, link: URL?) -> [NSAttributedString.Key: Any] {
         // Explicit foreground color: text lacking it renders black regardless
         // of textColor — invisible in dark mode. labelColor adapts.
         var attrs: [NSAttributedString.Key: Any] = [
@@ -605,6 +605,32 @@ enum HTMLParser {
                                                                     link: attrs[.link] as? URL)))
         }
         return out
+    }
+
+    // Spreadsheet apps paste HTML wrapped in their own boilerplate and raw
+    // attributes; drop that pass-through markup so the model owns the re-emission.
+    static func sanitizedForPaste(_ parsed: ParsedTable) -> ParsedTable {
+        var p = parsed
+        p.sourcePrefix = ""
+        p.sourceSuffix = ""
+        p.attributes = []
+        p.columnMarkup = []
+        p.caption = nil
+        p.captionRaw = nil
+        p.legacyName = nil
+        p.diagnostics = []
+        p.rows = parsed.rows.map { row in
+            var r = row
+            r.rawAttributes = ""
+            r.cells = row.cells.map { cell in
+                var c = cell
+                c.rawAttributes = ""
+                c.rawInnerHTML = nil
+                return c
+            }
+            return r
+        }
+        return p
     }
 
     // MARK: - Entities

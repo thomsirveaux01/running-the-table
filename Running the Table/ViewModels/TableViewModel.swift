@@ -2235,13 +2235,25 @@ final class TableViewModel {
         }
     }
 
-    /// ⌘V with a cell focused: an HTML table on the pasteboard is merged into the
-    /// current table at that cell, growing it as needed. True when a table was pasted.
+    /// ⌘V with a cell focused: an HTML table on the pasteboard (or tab-separated
+    /// text from an app that puts no HTML there) is merged into the current table
+    /// at that cell, growing it as needed. True when a table was pasted.
     func pasteTableIntoCurrentTable() -> Bool {
-        guard let f = focusedCell,
-              let html = NSPasteboard.general.string(forType: .html),
-              html.range(of: "<table", options: .caseInsensitive) != nil else { return false }
-        let pasted = Table.loaded(from: HTMLParser.parseTable(html), name: "Pasted")
+        guard let f = focusedCell else { return false }
+        let pasteboard = NSPasteboard.general
+        let html = pasteboard.string(forType: .html)
+        let source: String
+        if let html, html.range(of: "<table", options: .caseInsensitive) != nil {
+            source = html
+        } else if html == nil,
+                  let text = pasteboard.string(forType: .string), text.contains("\t") {
+            // Apps that put no HTML on the pasteboard (Numbers) still put
+            // tab-separated text there; tabs mark a grid, so paste it as one.
+            source = text
+        } else {
+            return false
+        }
+        let pasted = Table.loaded(from: HTMLParser.sanitizedForPaste(HTMLParser.parseTable(source)), name: "Pasted")
         guard !pasted.rows.isEmpty else { return false }
         performUndoable("Paste") {
             self.mergePastedTable(pasted, at: f)
@@ -2328,7 +2340,9 @@ final class TableViewModel {
         let pasteboard = NSPasteboard.general
         guard let source = pasteboard.string(forType: .html) ?? pasteboard.string(forType: .string),
               !source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        let parsed = HTMLParser.parseTable(source)
+        // Strip the source app's page boilerplate and raw attributes so the
+        // pasted table is re-emitted from the model alone.
+        let parsed = HTMLParser.sanitizedForPaste(HTMLParser.parseTable(source))
         guard !parsed.rows.isEmpty else { return }
         closeTypingGroup()
         flushToDocument()
@@ -2539,6 +2553,77 @@ final class TableViewModel {
         try? markdown.write(to: url, atomically: true, encoding: .utf8)
     }
 
+    // MARK: - Spreadsheet import
+
+    /// File ▸ Import ▸ Excel… / OpenDocument…: each sheet of the chosen
+    /// workbook becomes its own document, one undo step per file.
+    func importSpreadsheet(_ format: SpreadsheetFormat) {
+        Self.spreadsheetImporter.chooseSpreadsheetFiles(format: format, prompt: "Import", into: nil) { [weak self] urls in
+            guard let self, let urls else { return }
+            for url in urls { self.importSpreadsheetFile(at: url) }
+        }
+    }
+
+    func importSpreadsheetFile(at url: URL) {
+        let accessed = Self.csvBeginAccess(url)
+        defer { if accessed { Self.csvEndAccess(url) } }
+        do {
+            // Sheets with no content at all are dropped, not imported as blanks.
+            let sheets = try SpreadsheetImporter.sheets(in: url).filter { sheet in
+                sheet.table.rows.contains { row in
+                    row.cells.contains { !$0.content.string.isEmpty }
+                }
+            }
+            guard !sheets.isEmpty else { return }
+            newTables(fromSheets: sheets, fileBase: url.deletingPathExtension().lastPathComponent)
+        } catch {
+            // A total read failure would otherwise vanish silently.
+            let alert = NSAlert()
+            alert.messageText = "Import Failed"
+            alert.informativeText = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            alert.runModal()
+        }
+    }
+
+    /// One document per sheet, titled "file – sheet" (just the file base for a
+    /// single-sheet workbook); the first is loaded and the file is one undo step.
+    func newTables(fromSheets sheets: [ImportedSpreadsheetSheet], fileBase: String) {
+        closeTypingGroup()
+        flushToDocument()
+        let beforeDocuments = deepCopied(documents)
+        let beforeSelection = selectedDocumentID
+
+        var taken = Set(documents.map(\.name))
+        var firstID: UUID?
+        var firstDisplayName = ""
+        var newDocs: [TableDocument] = []
+        for sheet in sheets {
+            let base = sheets.count == 1 ? fileBase : "\(fileBase) – \(sheet.name)"
+            let displayName = uniqueName(base, avoiding: taken)
+            taken.insert(displayName)
+            if firstID == nil { firstDisplayName = displayName }
+            var table = sheet.table
+            table.name = displayName
+            var doc = TableDocument(table: table, fileURL: nil)
+            doc.lastEdited = Date()
+            newDocs.append(doc)
+            if firstID == nil { firstID = doc.id }
+        }
+        // Workbook order is preserved: the first sheet lands at the top.
+        withAnimation { documents.insert(contentsOf: newDocs, at: 0) }
+        if let firstID, let doc = documents.first(where: { $0.id == firstID }) {
+            loadDocument(doc)
+            sidebarSelection = [firstID]
+        }
+
+        let undoName = sheets.count == 1
+            ? "Import \(firstDisplayName)"
+            : "Import \(sheets.count) Tables"
+        registerDocumentUndo(name: undoName,
+                             undoTo: beforeDocuments, undoSelection: beforeSelection,
+                             redoTo: deepCopied(documents), redoSelection: selectedDocumentID)
+    }
+
     /// True when a text view owns the caret; field editors are NSTextViews, so all inputs are one check.
     static func caretInTextView(_ window: NSWindow?) -> Bool {
         window?.firstResponder is NSTextView
@@ -2617,4 +2702,7 @@ final class TableViewModel {
     // Markdown picking behind the same injectable seams as CSV; the access pair is shared.
     static var mdImporter: MarkdownFileImporting = SystemMarkdownImporter()
     static var mdExporter: MarkdownFileExporting = SystemMarkdownExporter()
+
+    // Spreadsheet picking behind the same injectable seams; the access pair is shared.
+    static var spreadsheetImporter: SpreadsheetFileImporting = SystemSpreadsheetImporter()
 }
