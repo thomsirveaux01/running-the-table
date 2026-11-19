@@ -526,6 +526,15 @@ final class TableViewModel {
         return chars
     }
 
+    /// ⌘A in select mode: the whole table becomes the selection range. The
+    /// editor answers for ⌘A itself while editing, so the grid only calls
+    /// this with a cell selected and no caret.
+    func selectAllCells() {
+        guard cellMode == .selected, focusedCell != nil, !table.rows.isEmpty else { return }
+        cellSelection = VisualCellRange(rowStart: 0, rowEnd: table.rows.count - 1,
+                                        colStart: 0, colEnd: table.columnCount - 1)
+    }
+
     /// Delete on a lone selected cell (no caret) empties it, one undoable step.
     private func clearSingleCellContent(_ target: GridCell) {
         guard var c = cell(row: target.row, col: target.column), c.content.length > 0 else { return }

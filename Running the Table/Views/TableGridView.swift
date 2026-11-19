@@ -345,7 +345,8 @@ final class GridDocumentView: NSView {
     // MARK: - Select-mode edit actions
 
     // In select mode the grid is first responder (no caret), so the Edit menu's
-    // copy:/cut:/paste: land here. A block copies as a table; a lone cell as content.
+    // copy:/cut:/paste:/selectAll: land here. A block copies as a table; a lone
+    // cell as content.
     @objc func copy(_ sender: Any?) {
         guard let viewModel = coordinator?.viewModel else { return }
         if viewModel.cellSelection != nil {
@@ -373,6 +374,10 @@ final class GridDocumentView: NSView {
         if let f = viewModel.focusedCell {
             viewModel.pasteStringIntoCell(f)
         }
+    }
+
+    override func selectAll(_ sender: Any?) {
+        coordinator?.viewModel.selectAllCells()
     }
 
     private var geometry: GridGeometry? {
