@@ -37,8 +37,9 @@ final class GridDragState {
     var dragged: Int?
     var target: Int?
     var translation: CGFloat = 0
+    // The moved row/column's new index; its real cells stay hidden while the
+    // floating copy springs into the slot.
     var settleSlot: Int?
-    var settleOffset: CGFloat = 0
 
     func reset() {
         dragged = nil
@@ -63,6 +64,8 @@ final class GridCoordinator: NSObject, NSTextViewDelegate, NSTextFieldDelegate {
     var selectionBorder: SelectionBorderView?
     var rowGapHighlight: GapHighlightView?
     var columnGapHighlight: GapHighlightView?
+    var rowFloating: DragFloatingView?
+    var columnFloating: DragFloatingView?
 
     // AppKit echoes programmatic text/selection swaps back as delegate
     // callbacks; publishing those would mutate the model mid-view-update.
@@ -249,10 +252,6 @@ final class GridCellView: NSView {
     var isRangeActive = false {
         didSet { if isRangeActive != oldValue { needsDisplay = true } }
     }
-    // The dragged column's cells fade; alphaValue covers the whole cell.
-    var isLifted = false {
-        didSet { if isLifted != oldValue { alphaValue = isLifted ? 0.5 : 1.0 } }
-    }
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -389,7 +388,6 @@ final class GridDocumentView: NSView {
     private lazy var editorClip = GridCellClipView()
     private var editorCell: GridCell?
     private var wiredEditor = false
-    private var settleTimer: Timer?
 
     // Drawing stack mirroring the editor's TextKit metrics (3pt container inset,
     // 5pt line-fragment padding) so drawn and edited text land identically.
@@ -492,7 +490,6 @@ final class GridDocumentView: NSView {
     private func syncCellViews(geom: GridGeometry, viewModel: TableViewModel, coordinator: GridCoordinator) {
         let focused = viewModel.focusedCell
         let rangeActive = viewModel.cellSelection != nil
-        let liftedCol = coordinator.columnDrag.dragged
         var seen: Set<GridCell> = []
         var contents: [GridCell: NSAttributedString] = [:]
         for (row, slots) in viewModel.cachedPlacements.enumerated() {
@@ -508,13 +505,15 @@ final class GridDocumentView: NSView {
                 }()
                 let rect = geom.cellRect(row: row, placement: p, coordinator: coordinator)
                 if view.frame != rect { view.frame = rect }
+                // The dragged row/column's floating copy is its only visible
+                // representation, through the settle spring.
+                view.isHidden = isHiddenByDrag(row: row, startCol: p.startCol, coordinator: coordinator)
                 guard let cell = viewModel.cell(row: row, col: p.cellIndex) else { continue }
                 view.content = cell.content
                 view.alignment = cell.alignment
                 view.isHeader = cell.isHeader
                 view.isFocused = focused == cellKey
                 view.isRangeActive = rangeActive
-                view.isLifted = (liftedCol == p.startCol)
                 contents[cellKey] = cell.content
             }
         }
@@ -561,7 +560,9 @@ final class GridDocumentView: NSView {
         }
         let rect = geom.cellRect(row: row, placement: placement, coordinator: coordinator)
         if editorClip.frame != rect { editorClip.frame = rect }
-        editorClip.isHidden = false
+        // Hidden while the cell's row/column is dragged or settling: the
+        // floating copy is the only visible representation.
+        editorClip.isHidden = isHiddenByDrag(row: row, startCol: placement.startCol, coordinator: coordinator)
         let model = viewModel.cell(row: focused.row, col: focused.column)
         // Park a caret only while editing; in select mode the editor shows the
         // text but a caret would flash on the next first-responder switch.
@@ -920,41 +921,31 @@ final class GridDocumentView: NSView {
     private func syncGapHighlights(geom: GridGeometry, coordinator: GridCoordinator) {
         let viewModel = coordinator.viewModel
         if let source = coordinator.rowDrag.dragged, let target = coordinator.rowDrag.target, target != source {
-            let wasVisible = coordinator.rowGapHighlight.map { !$0.isHidden } ?? false
             let view = coordinator.rowGapHighlight ?? {
                 let v = GapHighlightView()
                 coordinator.rowGapHighlight = v
                 addSubview(v)
                 return v
             }()
-            let frame = NSRect(x: WYSIWYGView.divider,
-                               y: WYSIWYGView.slotTop(source: source, target: target, rowHeights: viewModel.rowHeights)
-                                   + WYSIWYGView.columnGutterHeight + WYSIWYGView.divider + geom.captionBandHeight,
-                               width: WYSIWYGView.gutterWidth + WYSIWYGView.divider + geom.gridColumnsWidth,
-                               height: geom.rowHeight(source) + WYSIWYGView.divider)
-            // Glide to the new slot when it's already on screen so it tracks
-            // the path rows; place it directly on first show.
-            if wasVisible { view.setFrameSize(frame.size); glide(view, toOrigin: frame.origin) }
-            else { view.frame = frame }
+            // A 2pt line at the slot's top edge; it snaps to the landing slot
+            // instead of shading the whole band.
+            let y = WYSIWYGView.slotTop(source: source, target: target, rowHeights: viewModel.rowHeights)
+                + geom.gridTopEdge - WYSIWYGView.divider
+            view.frame = NSRect(x: geom.gridLeftEdge, y: y, width: geom.gridColumnsWidth, height: 2)
             view.isHidden = false
         } else {
             coordinator.rowGapHighlight?.isHidden = true
         }
         if let source = coordinator.columnDrag.dragged, let target = coordinator.columnDrag.target, target != source {
-            let wasVisible = coordinator.columnGapHighlight.map { !$0.isHidden } ?? false
             let view = coordinator.columnGapHighlight ?? {
                 let v = GapHighlightView()
                 coordinator.columnGapHighlight = v
                 addSubview(v)
                 return v
             }()
-            let frame = NSRect(x: geom.gridLeftEdge - WYSIWYGView.divider
-                                    + WYSIWYGView.slotLeft(source: source, target: target, widths: viewModel.columnWidths),
-                                y: WYSIWYGView.divider,
-                                width: geom.columnWidth(source) + WYSIWYGView.divider,
-                                height: WYSIWYGView.columnGutterHeight + geom.captionBandHeight + geom.gridHeight)
-            if wasVisible { view.setFrameSize(frame.size); glide(view, toOrigin: frame.origin) }
-            else { view.frame = frame }
+            let x = geom.gridLeftEdge - WYSIWYGView.divider
+                + WYSIWYGView.slotLeft(source: source, target: target, widths: viewModel.columnWidths)
+            view.frame = NSRect(x: x, y: geom.gridTopEdge, width: 2, height: geom.gridHeight - 2 * WYSIWYGView.divider)
             view.isHidden = false
         } else {
             coordinator.columnGapHighlight?.isHidden = true
@@ -979,7 +970,8 @@ final class GridDocumentView: NSView {
     }
 
     /// Editor (bottom), then strips/handles, then highlights, then the
-    /// selection border on top; re-adding an existing subview moves it front.
+    /// selection border, then the drag's floating copies on top; re-adding an
+    /// existing subview moves it front.
     private func restoreStackingOrder() {
         guard let coordinator else { return }
         // The cell views sit at the bottom; the editor clip must paint the
@@ -993,141 +985,149 @@ final class GridDocumentView: NSView {
         if let gap = coordinator.rowGapHighlight { addSubview(gap) }
         if let gap = coordinator.columnGapHighlight { addSubview(gap) }
         if let border = coordinator.selectionBorder { addSubview(border) }
+        if let floating = coordinator.rowFloating { addSubview(floating) }
+        if let floating = coordinator.columnFloating { addSubview(floating) }
     }
 
     // MARK: - Drag frame application (called by the handle views)
 
+    /// The cells a drag's floating copy stands in for: the dragged row/column
+    /// and the settling one, until its spring lands.
+    private func isHiddenByDrag(row: Int, startCol: Int, coordinator: GridCoordinator) -> Bool {
+        row == coordinator.rowDrag.dragged
+            || row == coordinator.rowDrag.settleSlot
+            || startCol == coordinator.columnDrag.dragged
+            || startCol == coordinator.columnDrag.settleSlot
+    }
+
+    /// Snapshots a band of the document into a floating overlay that tracks
+    /// the cursor; the real cells hide while it is up.
     @MainActor
-    func applyRowDragFrames(animated: Bool, coordinator: GridCoordinator) {
+    func makeFloatingCopy(of band: NSRect) -> DragFloatingView {
+        let view = DragFloatingView(frame: band)
+        // The caching rep is sized for the window's backing scale, so the
+        // snapshot stays sharp on Retina.
+        if let rep = bitmapImageRepForCachingDisplay(in: band) {
+            cacheDisplay(in: band, to: rep)
+            let image = NSImage(size: band.size)
+            image.addRepresentation(rep)
+            view.image = image
+        }
+        addSubview(view)
+        return view
+    }
+
+    @MainActor
+    func applyRowDragFrames(coordinator: GridCoordinator) {
         guard let geom = geometry else { return }
         let viewModel = coordinator.viewModel
         let dragged = coordinator.rowDrag.dragged
-        let isDragging = dragged != nil
-        // The grabbed row tracks the cursor directly; path rows glide so a
-        // target change retargets smoothly; the settle slot is timer-driven,
-        // so it stays direct. `animated` is legacy (all callers pass false).
+        // The dragged row's cells hide behind its floating copy; path rows
+        // reflow in one frame, the way Numbers does.
         for (row, slots) in viewModel.cachedPlacements.enumerated() {
             for p in slots {
                 guard let view = cellViews[GridCell(row: row, column: p.cellIndex)] else { continue }
+                let hidden = isHiddenByDrag(row: row, startCol: p.startCol, coordinator: coordinator)
+                if view.isHidden != hidden { view.isHidden = hidden }
+                if hidden { continue }
                 let rect = geom.cellRect(row: row, placement: p, coordinator: coordinator)
-                if view.frame.origin == rect.origin { continue }
-                if row == dragged || !isDragging {
-                    view.setFrameOrigin(rect.origin)
-                } else {
-                    glide(view, toOrigin: rect.origin)
-                }
+                if view.frame.origin != rect.origin { view.setFrameOrigin(rect.origin) }
             }
         }
         for row in 0..<viewModel.table.rows.count {
             guard let strip = coordinator.rowStrips[row] else { continue }
-            let origin = NSPoint(x: strip.frame.minX,
-                                 y: geom.gridTopEdge + geom.localRowTop(row) + geom.rowOffset(row, coordinator: coordinator))
-            if strip.frame.origin == origin { continue }
-            if row == dragged || !isDragging {
-                strip.setFrameOrigin(origin)
-            } else {
-                glide(strip, toOrigin: origin)
-            }
+            // The dragged row's grip rides the floating copy 1:1.
+            let y = row == dragged
+                ? geom.gridTopEdge + geom.localRowTop(row) + coordinator.rowDrag.translation
+                : geom.gridTopEdge + geom.localRowTop(row) + geom.rowOffset(row, coordinator: coordinator)
+            let origin = NSPoint(x: strip.frame.minX, y: y)
+            if strip.frame.origin != origin { strip.setFrameOrigin(origin) }
         }
         syncGapHighlights(geom: geom, coordinator: coordinator)
         placeEditor(geom: geom, coordinator: coordinator)
     }
 
     @MainActor
-    func applyColumnDragFrames(animated: Bool, coordinator: GridCoordinator) {
+    func applyColumnDragFrames(coordinator: GridCoordinator) {
         guard let geom = geometry else { return }
         let viewModel = coordinator.viewModel
         let dragged = coordinator.columnDrag.dragged
-        let isDragging = dragged != nil
-        // The lift fade was computed fresh in draw() before cells became
-        // subviews, so re-apply it here; sync() clears it after the drop.
         for (row, slots) in viewModel.cachedPlacements.enumerated() {
             for p in slots {
                 guard let view = cellViews[GridCell(row: row, column: p.cellIndex)] else { continue }
-                view.isLifted = (dragged == p.startCol)
+                let hidden = isHiddenByDrag(row: row, startCol: p.startCol, coordinator: coordinator)
+                if view.isHidden != hidden { view.isHidden = hidden }
+                if hidden { continue }
                 let rect = geom.cellRect(row: row, placement: p, coordinator: coordinator)
-                if view.frame.origin == rect.origin { continue }
-                if p.startCol == dragged || !isDragging {
-                    view.setFrameOrigin(rect.origin)
-                } else {
-                    glide(view, toOrigin: rect.origin)
-                }
+                if view.frame.origin != rect.origin { view.setFrameOrigin(rect.origin) }
             }
         }
         for col in 0..<viewModel.columnWidths.count {
             guard let strip = coordinator.columnStrips[col] else { continue }
-            let origin = NSPoint(x: geom.gridLeftEdge + geom.localColumnLeft(col) + geom.columnShift(col, coordinator: coordinator),
-                                 y: strip.frame.minY)
-            if strip.frame.origin == origin { continue }
-            if col == dragged || !isDragging {
-                strip.setFrameOrigin(origin)
-            } else {
-                glide(strip, toOrigin: origin)
-            }
+            let x = col == dragged
+                ? geom.gridLeftEdge + geom.localColumnLeft(col) + coordinator.columnDrag.translation
+                : geom.gridLeftEdge + geom.localColumnLeft(col) + geom.columnShift(col, coordinator: coordinator)
+            let origin = NSPoint(x: x, y: strip.frame.minY)
+            if strip.frame.origin != origin { strip.setFrameOrigin(origin) }
         }
         syncGapHighlights(geom: geom, coordinator: coordinator)
         placeEditor(geom: geom, coordinator: coordinator)
     }
 
-    /// Springs the settle offset home at 60 Hz: the commit relays rows instantly, so
-    /// pin the dropped row at its visual position and ease it into the new slot.
+    /// Springs the floating copy from the cursor into the moved row/column's
+    /// new slot; the real cells stay hidden until it lands.
     @MainActor
-    func startSettle(vertical: Bool, coordinator: GridCoordinator) {
-        settleTimer?.invalidate()
+    func settleFloating(vertical: Bool, coordinator: GridCoordinator) {
+        guard let geom = geometry else { return }
         let drag = vertical ? coordinator.rowDrag : coordinator.columnDrag
-        guard drag.settleSlot != nil else { return }
-        let from = drag.settleOffset
-        let start = Date()
-        settleTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0, repeats: true) { [weak self] timer in
+        guard let slot = drag.settleSlot,
+              let floating = vertical ? coordinator.rowFloating : coordinator.columnFloating else { return }
+        let band: NSRect
+        if vertical {
+            band = NSRect(x: geom.gridLeftEdge,
+                          y: geom.gridTopEdge + geom.localRowTop(slot),
+                          width: geom.gridColumnsWidth,
+                          height: geom.rowHeight(slot))
+        } else {
+            band = NSRect(x: geom.gridLeftEdge + geom.localColumnLeft(slot),
+                          y: geom.gridTopEdge,
+                          width: geom.columnWidth(slot),
+                          height: geom.gridHeight - 2 * WYSIWYGView.divider)
+        }
+        // The floating layer is detached (anchor 0,0) and its position IS the
+        // frame's origin in the document view's flipped space, so drive the
+        // spring from the layer's real position — not a recomputed center.
+        let fromPos = floating.layer?.position ?? .zero
+        floating.frame = band
+        let toPos = floating.layer?.position ?? .zero
+        // perceptualDuration/bounce are read-only; the convenience init is
+        // how they get set.
+        let spring = CASpringAnimation(perceptualDuration: 0.3, bounce: 0.2)
+        spring.keyPath = "position"
+        spring.fromValue = NSValue(point: fromPos)
+        spring.toValue = NSValue(point: toPos)
+        // A faster second drop can replace the floating copy mid-flight; only
+        // tear down this settle's own view and slot.
+        CATransaction.begin()
+        CATransaction.setCompletionBlock { [weak self, weak coordinator, weak floating, slot] in
             MainActor.assumeIsolated {
-                guard let self, let coordinator = self.coordinator else { timer.invalidate(); return }
-                let drag = vertical ? coordinator.rowDrag : coordinator.columnDrag
-                let t = min(max(Date().timeIntervalSince(start) / 0.3, 0), 1)
-                let eased = 1 - (1 - t) * (1 - t)
-                drag.settleOffset = from * CGFloat(1 - eased)
+                guard let self, let coordinator else { return }
+                floating?.removeFromSuperview()
                 if vertical {
-                    self.applyRowDragFrames(animated: false, coordinator: coordinator)
+                    if coordinator.rowFloating === floating { coordinator.rowFloating = nil }
+                    if coordinator.rowDrag.settleSlot == slot { coordinator.rowDrag.settleSlot = nil }
                 } else {
-                    self.applyColumnDragFrames(animated: false, coordinator: coordinator)
+                    if coordinator.columnFloating === floating { coordinator.columnFloating = nil }
+                    if coordinator.columnDrag.settleSlot == slot { coordinator.columnDrag.settleSlot = nil }
                 }
-                if t >= 1 {
-                    timer.invalidate()
-                    drag.settleSlot = nil
-                    drag.settleOffset = 0
-                    self.sync()
-                }
+                self.sync()
             }
         }
+        floating.layer?.add(spring, forKey: "settle")
+        CATransaction.commit()
     }
 
     private var viewModel: TableViewModel? { coordinator?.viewModel }
-
-    private func animate(_ view: NSView, fromX: CGFloat = 0, toX: CGFloat? = nil,
-                         fromY: CGFloat = 0, toY: CGFloat? = nil, animated: Bool) {
-        var origin = view.frame.origin
-        if let toX { origin.x = toX }
-        if let toY { origin.y = toY }
-        guard animated else {
-            view.setFrameOrigin(origin)
-            return
-        }
-        NSAnimationContext.runAnimationGroup { ctx in
-            ctx.duration = 0.28
-            ctx.allowsImplicitAnimation = true
-            view.animator().setFrameOrigin(origin)
-        }
-    }
-
-    /// Glides a cell (or strip) to a new origin. Retargeting mid-glide is
-    /// smooth — AppKit animates from the presentation value, so a fast drag
-    /// crossing several rows never snaps (measured, see verified-facts.md).
-    private func glide(_ view: NSView, toOrigin: NSPoint) {
-        NSAnimationContext.runAnimationGroup { ctx in
-            ctx.duration = 0.18
-            ctx.allowsImplicitAnimation = true
-            view.animator().setFrameOrigin(toOrigin)
-        }
-    }
 
     override func resetCursorRects() {
         // The handle views own their cursor rects; nothing to add here.
@@ -1143,21 +1143,38 @@ extension GridCoordinator {
 
 // MARK: - Overlay views
 
+/// A 2pt accent line marking the dragged row/column's landing slot; it snaps
+/// to the slot edge rather than shading the whole band.
 final class GapHighlightView: NSView {
     override var isFlipped: Bool { true }
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
-        // Layer-backed so a move-drag can glide it to the new slot with
-        // animator() (smooth retargeting needs a presentation layer).
-        wantsLayer = true
-    }
+    override init(frame frameRect: NSRect) { super.init(frame: frameRect) }
     required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
     override func draw(_ dirtyRect: NSRect) {
-        NSColor.controlAccentColor.withAlphaComponent(0.28).setFill()
-        NSBezierPath(roundedRect: bounds, xRadius: 2, yRadius: 2).fill()
+        NSColor.controlAccentColor.setFill()
+        bounds.fill()
     }
 
     // Paint-only overlays must not swallow the clicks meant for the cells (or editor) underneath them.
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+}
+
+/// A 1:1 snapshot of the dragged row/column that tracks the cursor; the real
+/// cells hide while it is up, and it springs into the final slot on drop.
+final class DragFloatingView: NSView {
+    var image: NSImage?
+    override var isFlipped: Bool { true }
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        // Layer-backed so the settle spring moves the cached snapshot without
+        // redrawing it; the image itself is drawn through the flipped view.
+        wantsLayer = true
+        alphaValue = 0.8
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+    override func draw(_ dirtyRect: NSRect) {
+        image?.draw(in: bounds)
+    }
+    // Paint-only overlays must not swallow the clicks meant for the cells underneath them.
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
 }
 
@@ -1275,47 +1292,59 @@ final class RowMoveHandleView: NSView {
             return
         }
         var snapshot: EditorSnapshot?
-        let geom = GridGeometry(viewModel: coordinator.viewModel)
+        var band: NSRect = .zero
         monitor = GridDragGesture.start(event: event, minimumDistance: 3, axisIsVertical: true,
             onChanged: { [weak self, weak coordinator, weak documentView] translation, first in
                 guard let coordinator, let documentView else { return }
                 if first {
                     snapshot = coordinator.viewModel.currentSnapshot()
                     coordinator.rowDrag.settleSlot = nil
-                    coordinator.rowDrag.settleOffset = 0
                     coordinator.rowDrag.reset()
                     coordinator.rowDrag.dragged = self?.row
                     coordinator.rowDrag.target = self?.row
+                    // Lift the row out of the flow: snapshot its band for the
+                    // floating copy; the real cells hide and path rows reflow.
+                    let geom = GridGeometry(viewModel: coordinator.viewModel)
+                    band = NSRect(x: geom.gridLeftEdge,
+                                  y: geom.gridTopEdge + geom.localRowTop(self?.row ?? 0),
+                                  width: geom.gridColumnsWidth,
+                                  height: geom.rowHeight(self?.row ?? 0))
+                    coordinator.rowFloating = documentView.makeFloatingCopy(of: band)
                 }
                 coordinator.rowDrag.translation = translation
+                coordinator.rowFloating?.frame.origin = NSPoint(x: band.minX, y: band.minY + translation)
                 let landing = Self.landingIndex(translation: translation, index: self?.row ?? 0,
                                                 count: coordinator.viewModel.table.rows.count,
                                                 sizes: coordinator.viewModel.rowHeights,
                                                 fallback: TableViewModel.defaultRowHeight)
                 coordinator.rowDrag.target = landing
-                documentView.applyRowDragFrames(animated: false, coordinator: coordinator)
+                documentView.applyRowDragFrames(coordinator: coordinator)
             },
             onEnded: { [weak self, weak coordinator, weak documentView] translation in
                 guard let self, let coordinator, let documentView else { return }
-                defer { coordinator.rowDrag.reset(); documentView.sync() }
-                guard let before = snapshot, translation != 0 else { return }
+                defer { coordinator.rowDrag.reset() }
+                guard let before = snapshot, translation != 0 else {
+                    coordinator.rowFloating?.removeFromSuperview()
+                    coordinator.rowFloating = nil
+                    documentView.sync()
+                    return
+                }
                 let dest = Self.landingIndex(translation: translation, index: self.row,
                                              count: coordinator.viewModel.table.rows.count,
                                              sizes: coordinator.viewModel.rowHeights,
                                              fallback: TableViewModel.defaultRowHeight)
                 let source = self.row
-                // The row's current visual top, per rowOffset's math.
-                let gap = WYSIWYGView.slotTop(source: source, target: dest, rowHeights: coordinator.viewModel.rowHeights)
-                let slack = min(max(geom.rowTop(source) + translation - gap, -WYSIWYGView.followSlack), WYSIWYGView.followSlack)
-                let visualTop = gap + slack
-                coordinator.viewModel.moveRow(from: source, to: dest, before: before)
-                // The new slot's top must come from the post-move heights, so
-                // re-read geometry before pinning the row at its visual spot.
-                let moved = GridGeometry(viewModel: coordinator.viewModel)
-                coordinator.rowDrag.settleSlot = dest
-                coordinator.rowDrag.settleOffset = visualTop - moved.rowTop(dest)
+                // A merge crossing the travel band makes the move a no-op;
+                // spring the copy back to the row's own slot.
+                let slot = coordinator.viewModel.canMoveRow(from: source, to: dest) ? dest : source
+                if slot != source {
+                    coordinator.viewModel.moveRow(from: source, to: dest, before: before)
+                }
+                // The moved row's cells stay hidden while the floating copy
+                // springs into its slot.
+                coordinator.rowDrag.settleSlot = slot
                 documentView.sync()
-                documentView.startSettle(vertical: true, coordinator: coordinator)
+                documentView.settleFloating(vertical: true, coordinator: coordinator)
             })
         needsDisplay = true
     }
@@ -1388,45 +1417,60 @@ final class ColumnMoveHandleView: NSView {
             return
         }
         var snapshot: EditorSnapshot?
-        let geom = GridGeometry(viewModel: coordinator.viewModel)
+        var band: NSRect = .zero
         monitor = GridDragGesture.start(event: event, minimumDistance: 3, axisIsVertical: false,
             onChanged: { [weak self, weak coordinator, weak documentView] translation, first in
                 guard let coordinator, let documentView else { return }
                 if first {
                     snapshot = coordinator.viewModel.currentSnapshot()
                     coordinator.columnDrag.settleSlot = nil
-                    coordinator.columnDrag.settleOffset = 0
                     coordinator.columnDrag.reset()
                     coordinator.columnDrag.dragged = self?.col
                     coordinator.columnDrag.target = self?.col
+                    // Lift the column out of the flow: snapshot its band for
+                    // the floating copy; the real cells hide and path columns
+                    // reflow.
+                    let geom = GridGeometry(viewModel: coordinator.viewModel)
+                    band = NSRect(x: geom.gridLeftEdge + geom.localColumnLeft(self?.col ?? 0),
+                                  y: geom.gridTopEdge,
+                                  width: geom.columnWidth(self?.col ?? 0),
+                                  height: geom.gridHeight - 2 * WYSIWYGView.divider)
+                    coordinator.columnFloating = documentView.makeFloatingCopy(of: band)
                 }
                 coordinator.columnDrag.translation = translation
+                coordinator.columnFloating?.frame.origin = NSPoint(x: band.minX + translation, y: band.minY)
                 let landing = Self.landingIndex(translation: translation, index: self?.col ?? 0,
                                                 count: coordinator.viewModel.columnWidths.count,
                                                 sizes: coordinator.viewModel.columnWidths,
                                                 fallback: TableViewModel.defaultColumnWidth)
                 coordinator.columnDrag.target = landing
-                documentView.applyColumnDragFrames(animated: false, coordinator: coordinator)
+                documentView.applyColumnDragFrames(coordinator: coordinator)
             },
             onEnded: { [weak self, weak coordinator, weak documentView] translation in
                 guard let self, let coordinator, let documentView else { return }
-                defer { coordinator.columnDrag.reset(); documentView.sync() }
-                guard let before = snapshot, translation != 0 else { return }
+                defer { coordinator.columnDrag.reset() }
+                guard let before = snapshot, translation != 0 else {
+                    coordinator.columnFloating?.removeFromSuperview()
+                    coordinator.columnFloating = nil
+                    documentView.sync()
+                    return
+                }
                 let dest = Self.landingIndex(translation: translation, index: self.col,
                                              count: coordinator.viewModel.columnWidths.count,
                                              sizes: coordinator.viewModel.columnWidths,
                                              fallback: TableViewModel.defaultColumnWidth)
                 let source = self.col
-                // The column's current visual left, per columnShift's math.
-                let gap = WYSIWYGView.slotLeft(source: source, target: dest, widths: coordinator.viewModel.columnWidths)
-                let slack = min(max(geom.columnLeft(source) + translation - gap, -WYSIWYGView.followSlack), WYSIWYGView.followSlack)
-                let visualLeft = gap + slack
-                coordinator.viewModel.moveColumn(from: source, to: dest, before: before)
-                let moved = GridGeometry(viewModel: coordinator.viewModel)
-                coordinator.columnDrag.settleSlot = dest
-                coordinator.columnDrag.settleOffset = visualLeft - moved.columnLeft(dest)
+                // A merge crossing the travel band makes the move a no-op;
+                // spring the copy back to the column's own slot.
+                let slot = coordinator.viewModel.canMoveColumn(from: source, to: dest) ? dest : source
+                if slot != source {
+                    coordinator.viewModel.moveColumn(from: source, to: dest, before: before)
+                }
+                // The moved column's cells stay hidden while the floating copy
+                // springs into its slot.
+                coordinator.columnDrag.settleSlot = slot
                 documentView.sync()
-                documentView.startSettle(vertical: false, coordinator: coordinator)
+                documentView.settleFloating(vertical: false, coordinator: coordinator)
             })
         needsDisplay = true
     }
@@ -1587,16 +1631,6 @@ struct GridGeometry {
         CGFloat(row) * divider + rowHeights.prefix(row).reduce(0, +)
     }
 
-    func rowTop(_ row: Int) -> CGFloat {
-        guard row > 0, row < rowHeights.count else { return divider }
-        return divider + rowHeights[0..<row].reduce(0, +) + CGFloat(row) * divider
-    }
-
-    func columnLeft(_ col: Int) -> CGFloat {
-        guard col > 0, col < columnWidths.count else { return divider }
-        return divider + columnWidths[0..<col].reduce(0, +) + CGFloat(col) * divider
-    }
-
     /// Height of a cell that towers over `rowSpan` rows, dividers included.
     func cellHeight(row: Int, rowSpan: Int) -> CGFloat {
         // @Observable partial invalidation can re-run a removed slot's content closure
@@ -1609,18 +1643,10 @@ struct GridGeometry {
         return height
     }
 
-    // Rows between source and landing slot slide aside; the grabbed row
-    // rides the opened gap, rubber-banded to the cursor.
+    // Rows between source and landing slot slide aside in one frame; the
+    // dragged row itself is hidden behind its floating copy.
     func rowOffset(_ row: Int, coordinator: GridCoordinator) -> CGFloat {
         let drag = coordinator.rowDrag
-        if drag.dragged == row {
-            let target = drag.target ?? row
-            let gap = WYSIWYGView.slotTop(source: row, target: target, rowHeights: rowHeights)
-            let desired = rowTop(row) + drag.translation
-            let slack = min(max(desired - gap, -WYSIWYGView.followSlack), WYSIWYGView.followSlack)
-            return gap + slack - rowTop(row)
-        }
-        if drag.settleSlot == row { return drag.settleOffset }
         guard let source = drag.dragged, let target = drag.target, target != source else { return 0 }
         let step = rowHeight(source) + divider
         if target > source, row > source, row <= target { return -step }
@@ -1630,14 +1656,6 @@ struct GridGeometry {
 
     func columnShift(_ col: Int, coordinator: GridCoordinator) -> CGFloat {
         let drag = coordinator.columnDrag
-        if drag.dragged == col {
-            let target = drag.target ?? col
-            let gap = WYSIWYGView.slotLeft(source: col, target: target, widths: columnWidths)
-            let desired = columnLeft(col) + drag.translation
-            let slack = min(max(desired - gap, -WYSIWYGView.followSlack), WYSIWYGView.followSlack)
-            return gap + slack - columnLeft(col)
-        }
-        if drag.settleSlot == col { return drag.settleOffset }
         guard let source = drag.dragged, let target = drag.target, target != source else { return 0 }
         let step = columnWidth(source) + divider
         if target > source, col > source, col <= target { return -step }

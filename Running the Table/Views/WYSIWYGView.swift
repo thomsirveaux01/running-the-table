@@ -11,9 +11,6 @@ struct WYSIWYGView: View {
     static let gutterWidth: CGFloat = 22
     static let columnGutterHeight: CGFloat = 22
     static let captionHeight: CGFloat = 28
-    /// How far a dragged strip's preview may lead the cursor; the offset eases toward
-    /// min(raw translation, this), so slots glide instead of teleporting ahead of the pointer.
-    static let followSlack: CGFloat = 8
 
     var body: some View {
         // Touch every property a layout change depends on: @Observable only invalidates

@@ -852,13 +852,21 @@ final class TableViewModel {
         rowTravelable(row)
     }
 
+    /// moveRow's guard, exposed so a drag can tell a real move from a no-op
+    /// (a merge crossing the travel band) and spring back instead.
+    func canMoveRow(from source: Int, to destination: Int) -> Bool {
+        let count = table.rows.count
+        let dest = min(max(destination, 0), count - 1)
+        return table.rows.indices.contains(source) && dest != source
+            && rowTravelable(source)
+            && !table.rowspanSplitsBand(min(source, dest), max(source, dest))
+    }
+
     // Height and focus travel with the row; the drag-start snapshot is the single undo step.
     func moveRow(from source: Int, to destination: Int, before: EditorSnapshot) {
         let count = table.rows.count
         let dest = min(max(destination, 0), count - 1)
-        guard table.rows.indices.contains(source), dest != source,
-              rowTravelable(source),
-              !table.rowspanSplitsBand(min(source, dest), max(source, dest)) else { return }
+        guard canMoveRow(from: source, to: dest) else { return }
         let toOffset = dest > source ? dest + 1 : dest
         table.rows.move(fromOffsets: IndexSet(integer: source), toOffset: toOffset)
         if rowHeights.indices.contains(source) {
@@ -894,13 +902,21 @@ final class TableViewModel {
         return !cachedColumnHasMerge(col)
     }
 
+    /// moveColumn's guard, exposed so a drag can tell a real move from a
+    /// no-op (a merge crossing the travel band) and spring back instead.
+    func canMoveColumn(from source: Int, to destination: Int) -> Bool {
+        let count = table.columnCount
+        let dest = min(max(destination, 0), count - 1)
+        return source >= 0 && source < count && dest != source
+            && !table.colspanSplitsBand(min(source, dest), max(source, dest))
+    }
+
     // Width and focus travel with the column; cells are matched by grid
     // column, not array index, so colspan rows stay consistent.
     func moveColumn(from source: Int, to destination: Int, before: EditorSnapshot) {
         let count = table.columnCount
         let dest = min(max(destination, 0), count - 1)
-        guard source >= 0, source < count, dest != source,
-              !table.colspanSplitsBand(min(source, dest), max(source, dest)) else { return }
+        guard canMoveColumn(from: source, to: dest) else { return }
         let toOffset = dest > source ? dest + 1 : dest
         if columnWidths.indices.contains(source) {
             columnWidths.move(fromOffsets: IndexSet(integer: source), toOffset: toOffset)
