@@ -14,7 +14,7 @@ Lightweight macOS table editor for clean HTML tables. WYSIWYG grid on top, live 
 - HTML mode uses IDE-style colors and row numbering. 
 - Save any table as a template. 
 - Supports pasting existing HTML code directly into the HTML block.
-- Import and export CSV and Markdown files. Paste cells from Excel/Sheets/Numbers.
+- Import and export CSV and Markdown files, and import Excel (.xlsx) and OpenDocument (.ods) spreadsheets (each sheet becomes a table, formulas resolved, dates shown as dates). Paste cells from Excel/Sheets/Numbers.
 - Defaults to saving in sandboxed Documents folder. Select a custom folder to sync with the cloud service of your choice.
 
 ## Building
@@ -32,5 +32,5 @@ Running the Table/
   Models/      Table, TableCell, TableDocument
   ViewModels/  TableViewModel — all app state, undo, autosave
   Views/       grid, cells, HTML pane, toolbar
-  Utils/       HTMLGenerator, HTMLParser, HTMLHighlighter
+  Utils/       HTMLGenerator, HTMLParser, HTMLHighlighter, SpreadsheetImporter, FormulaEvaluator
 ```
