@@ -16,10 +16,7 @@ struct LibrarySettingsView: View {
         .frame(width: 520)
     }
 
-    // MARK: - Tables folder
-
-    // Heading, path, and actions stack vertically; the path wraps to as many
-    // lines as needed so the whole folder is always visible.
+    // The path wraps to as many lines as needed so the whole folder is always visible.
     private var folderSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Tables Folder:")
@@ -37,8 +34,7 @@ struct LibrarySettingsView: View {
         }
     }
 
-    // The current version, plus a caption and Download button that persist
-    // after the update prompt is dismissed or skipped.
+    // The caption and Download button persist after the update prompt is dismissed or skipped.
     private var versionSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Version:")

@@ -3,9 +3,8 @@ import Foundation
 /// One-shot evaluation of xlsx formulas for files written without cached
 /// results (Openpyxl and the like); cells with cached values keep them.
 enum FormulaEvaluator {
-    /// Fills the text of formula cells whose cache is empty; other cells pass
-    /// through untouched. dateFormats maps a cellXfs slot to its Foundation
-    /// date format (or nil), so date-styled results render as dates.
+    /// Fills the text of formula cells whose cache is empty; other cells pass through untouched.
+    /// dateFormats maps a cellXfs slot to its Foundation date format so date-styled results render as dates.
     static func fillMissingValues(in sheets: [(name: String, cells: [SpreadsheetImporter.RawCell])],
                                   dateFormats: [String?] = [])
         -> [(name: String, cells: [SpreadsheetImporter.RawCell])] {
@@ -29,7 +28,6 @@ enum FormulaEvaluator {
         return out
     }
 
-    /// The text a computed value lands up as in the imported table.
     static func display(_ value: CellValue) -> String {
         switch value {
         case .number(let d): return SpreadsheetImporter.numericDisplay(d)
@@ -142,7 +140,7 @@ private final class Evaluator {
             case "&":
                 return .text(FormulaEvaluator.display(lv) + FormulaEvaluator.display(rv))
             default:
-                guard let cmp = compare(lv, rv) else { return .boolean(op == "<>") }
+                let cmp = compare(lv, rv)
                 switch op {
                 case "=": return .boolean(cmp == 0)
                 case "<>": return .boolean(cmp != 0)
@@ -159,9 +157,8 @@ private final class Evaluator {
     }
 
     /// Excel orders number < logical < text; empty compares as 0 or "".
-    private func compare(_ a: CellValue, _ b: CellValue) -> Int? {
+    private func compare(_ a: CellValue, _ b: CellValue) -> Int {
         switch (a, b) {
-        case (.error, _), (_, .error): return nil
         case (.number(let x), .number(let y)): return x < y ? -1 : x > y ? 1 : 0
         case (.boolean(let x), .boolean(let y)): return x == y ? 0 : (x ? 1 : -1)
         case (.text(let x), .text(let y)):
@@ -182,7 +179,7 @@ private final class Evaluator {
                 }
             }
             let ra = rank(a), rb = rank(b)
-            return ra < rb ? -1 : ra > rb ? 1 : nil
+            return ra < rb ? -1 : ra > rb ? 1 : 0
         }
     }
 
@@ -524,7 +521,6 @@ private enum FormulaParser {
         return tokens
     }
 
-    /// Reads an optional-$, letters, optional-$, digits reference from the stream.
     private static func cellRef(_ chars: inout [Character], _ i: inout Int) -> (row: Int, col: Int)? {
         if i < chars.count, chars[i] == "$" { i += 1 }
         var word = ""

@@ -1,7 +1,5 @@
 import SwiftUI
 
-/// Sheet for the table tag's own attributes: border, cellpadding, style, anything the
-/// author cares to write. Rows edit name/value pairs; the grid only keeps these.
 struct TableAttributesSheet: View {
     @Bindable var viewModel: TableViewModel
 

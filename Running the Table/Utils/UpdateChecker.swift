@@ -121,8 +121,7 @@ final class UpdateChecker {
         prompt = nil
     }
 
-    /// Downloads the prompted DMG to ~/Downloads and opens it (mounts, Finder
-    /// window). Any failure falls back to the release page — never dead-end.
+    /// Any failure falls back to the release page — never dead-end.
     func downloadPromptedUpdate() async {
         guard case .available = prompt, let release = availableUpdate else { return }
         prompt = nil
@@ -157,14 +156,7 @@ final class UpdateChecker {
         let fm = FileManager.default
         let dir = try fm.url(for: .downloadsDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
         // Never clobber: an existing download lands as "Name 2.dmg".
-        var dest = dir.appendingPathComponent(name)
-        let stem = (name as NSString).deletingPathExtension
-        let ext = (name as NSString).pathExtension
-        var suffix = 2
-        while fm.fileExists(atPath: dest.path) {
-            dest = dir.appendingPathComponent(ext.isEmpty ? "\(stem) \(suffix)" : "\(stem) \(suffix).\(ext)")
-            suffix += 1
-        }
+        let dest = dir.appendingPathComponent(uniquifiedName(name, in: dir) { fm.fileExists(atPath: $0.path) })
         try fm.moveItem(at: temp, to: dest)
         return dest
     }

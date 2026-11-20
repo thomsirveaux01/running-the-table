@@ -24,10 +24,8 @@ enum HTMLParser {
     private static let anyTagPattern = try! NSRegularExpression(pattern: "(?is)<[^>]*>")
     private static let hrefPattern = try! NSRegularExpression(pattern: "(?i)href\\s*=\\s*(?:\"([^\"]*)\"|'([^']*)'|([^\\s>]+))")
     private static let entityPattern = try! NSRegularExpression(pattern: "&(#x[0-9a-fA-F]+|#[0-9]+|[a-zA-Z][a-zA-Z0-9]*);")
-    // The style attribute, wherever it sits in the attribute text.
     private static let styleAttributePattern =
         try! NSRegularExpression(pattern: "(?i)style\\s*=\\s*(?:\"([^\"]*)\"|'([^']*)'|([^\\s>]+))")
-    // A text-align declaration, value running to the next semicolon.
     private static let textAlignPattern =
         try! NSRegularExpression(pattern: "(?i)\\btext-align\\s*:\\s*([^;]+)")
 
@@ -232,10 +230,8 @@ enum HTMLParser {
             return (attrText.trimmingCharacters(in: .whitespacesAndNewlines), .left)
         }
         let declRange = alignMatch.range
-        // Group 1 is the declaration's value, running to the next semicolon.
         let rawValue = (styleValue as NSString).substring(with: alignMatch.range(at: 1)).trimmingCharacters(in: .whitespaces)
         let alignment = Self.alignment(from: rawValue)
-        // Drop the declaration from the style value, keeping the other declarations.
         let sv = styleValue as NSString
         let remainingStyle = sv.substring(with: NSRange(location: 0, length: declRange.location))
             + sv.substring(with: NSRange(location: declRange.location + declRange.length,
@@ -585,9 +581,8 @@ enum HTMLParser {
         NSAttributedString(string: text, attributes: cellAttributes(bold: false, italic: false, link: nil))
     }
 
-    // Pasteboard rich text (Excel, Numbers, Safari) arrives as thousands of adjacent
-    // runs; re-express it in the cell attribute model so per-run passes stay cheap.
-    // Nil when the content already has few runs.
+    // Pasteboard rich text (Excel, Numbers, Safari) arrives as thousands of adjacent runs;
+    // re-express in the cell attribute model so per-run passes stay cheap. Nil when few runs.
     static func normalizedCellContent(_ s: NSAttributedString) -> NSAttributedString? {
         var runs = 0
         s.enumerateAttributes(in: NSRange(location: 0, length: s.length)) { _, _, stop in

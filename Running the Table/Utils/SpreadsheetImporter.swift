@@ -1,7 +1,7 @@
 import AppKit
 import UniformTypeIdentifiers
 
-/// One sheet of an imported workbook: its source name plus the table it became.
+/// One imported sheet and the table it became.
 struct ImportedSpreadsheetSheet {
     var name: String
     var table: Table
@@ -31,8 +31,6 @@ enum SpreadsheetImporter {
         }
     }
 
-    // MARK: - Zip
-
     private static func entry(_ url: URL, _ path: String) throws -> Data {
         var pointer: UnsafeMutablePointer<UInt8>?
         var size: Int64 = 0
@@ -45,8 +43,7 @@ enum SpreadsheetImporter {
 
     // MARK: - Shared grid model
 
-    /// How the source format typed the cell; drives formula evaluation and
-    /// number display.
+    /// The source format's cell type; drives formula evaluation and number display.
     enum RawKind {
         case number
         case text
@@ -240,9 +237,7 @@ enum SpreadsheetImporter {
         return handler.strings
     }
 
-    /// Per cellXfs slot: the font's bold/italic and, when the slot's number
-    /// format is a date, the Foundation format that renders it; a cell's s
-    /// attribute indexes this.
+    /// Per cellXfs slot: bold/italic and, when the slot's number format is a date, the Foundation format that renders it; a cell's s attribute indexes this.
     private static func parseXLSXCellStyles(_ data: Data?) -> [(bold: Bool, italic: Bool, dateFormat: String?)] {
         guard let data else { return [] }
         final class Handler: NSObject, XMLParserDelegate {
@@ -315,7 +310,6 @@ enum SpreadsheetImporter {
     /// Excel format code → Foundation date format, or nil when the code has no
     /// date or time tokens at all (i.e. it isn't a date format).
     nonisolated static func foundationDateFormat(from excelCode: String) -> String? {
-        // First pass: split the code into literal chunks and token runs.
         struct Run {
             let ch: Character
             let count: Int
@@ -339,7 +333,6 @@ enum SpreadsheetImporter {
                 continue
             }
             if c == "\\" {
-                // Escaped literal character.
                 i += 1
                 var lit = ""
                 if i < chars.count {
@@ -780,12 +773,9 @@ enum SpreadsheetImporter {
                         text = cellValue.isEmpty ? "" : SpreadsheetImporter.numericDisplay(Double(cellValue) ?? 0)
                         kind = .number
                     case "date", "time":
-                        // office:date-value / time-value are ISO 8601; render
-                        // them the way a reader expects, not as raw stamps.
                         text = cellValue.isEmpty ? "" : SpreadsheetImporter.odsDateDisplay(cellValue)
                         kind = .text
                     case "duration":
-                        // office:value is whole seconds.
                         text = cellValue.isEmpty ? ""
                             : (Double(cellValue).map(SpreadsheetImporter.durationDisplay(seconds:)) ?? cellValue)
                         kind = .text

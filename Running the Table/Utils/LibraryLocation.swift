@@ -5,6 +5,20 @@ import Observation
 // The library defaults to the sandboxed container Documents (no prompts); Settings moves it
 // anywhere via a security-scoped bookmark (keeps autosave legal). Templates ride the library.
 
+/// A bare name, not a URL: the caller appends the result to dir.
+func uniquifiedName(_ base: String, in dir: URL, isTaken: (URL) -> Bool) -> String {
+    let first = dir.appendingPathComponent(base)
+    guard isTaken(first) else { return base }
+    let stem = (base as NSString).deletingPathExtension
+    let ext = (base as NSString).pathExtension
+    var suffix = 2
+    while true {
+        let name = ext.isEmpty ? "\(stem) \(suffix)" : "\(stem) \(suffix).\(ext)"
+        if !isTaken(dir.appendingPathComponent(name)) { return name }
+        suffix += 1
+    }
+}
+
 /// Folder picking behind a protocol so tests script the result instead of raising a
 /// panel; presented as a titlebar-anchored window-modal sheet via beginSheetModal.
 protocol FolderChoosing {
@@ -162,16 +176,7 @@ enum LibraryLocation {
 
     private static func uniqueCopyURL(named name: String, in dir: URL) -> URL {
         let fm = FileManager.default
-        let candidate = dir.appendingPathComponent(name)
-        if !fm.fileExists(atPath: candidate.path) { return candidate }
-        let stem = (name as NSString).deletingPathExtension
-        let ext = (name as NSString).pathExtension
-        var suffix = 2
-        while true {
-            let next = dir.appendingPathComponent(ext.isEmpty ? "\(stem) \(suffix)" : "\(stem) \(suffix).\(ext)")
-            if !fm.fileExists(atPath: next.path) { return next }
-            suffix += 1
-        }
+        return dir.appendingPathComponent(uniquifiedName(name, in: dir) { fm.fileExists(atPath: $0.path) })
     }
 
     // Logical bytes for verify — allocated size varies with fragmentation and
@@ -195,8 +200,7 @@ enum LibraryLocation {
     }
 }
 
-// Launch-time and Settings driver: owns lost-access recovery and the
-// change-folder move/copy, reloading the view model after every root change.
+// Reloads the view model after every library-root change.
 @MainActor
 @Observable
 final class LibraryCoordinator {

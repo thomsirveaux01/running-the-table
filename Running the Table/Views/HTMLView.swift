@@ -62,7 +62,6 @@ struct HTMLView: View {
                 undoManager: viewModel.undoManager,
                 flushPendingEdits: { viewModel.closeTypingGroup() },
                 onTextChange: { viewModel.importFromHTML($0.string) },
-                onSelectionChange: { _ in },
                 onFocus: {
                     // Leaving the grid commits any open typing run there.
                     viewModel.closeTypingGroup()

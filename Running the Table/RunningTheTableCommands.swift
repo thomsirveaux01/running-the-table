@@ -286,7 +286,6 @@ enum AboutPanel {
         let text = "Andrew Cunningham, 2026\n\nVibe-coded locally with open-weight Apache 2.0 models on Apple Silicon Macs\n\nGitHub"
         let paragraph = NSMutableParagraphStyle()
         paragraph.alignment = .center
-        // Extra line space between the wrapped lines of the credits paragraph.
         paragraph.lineSpacing = 2.0
         let credits = NSMutableAttributedString(string: text, attributes: [
             .font: NSFont.systemFont(ofSize: NSFont.smallSystemFontSize),

@@ -96,6 +96,13 @@ final class CellTextView: NSTextView, NSMenuDelegate {
 
     override func keyDown(with event: NSEvent) {
         if keyCommandHandler?(event) == true { return }
+        // The menu Undo item is disabled while a typing run is pending (canUndo is false),
+        // so ⌘Z falls through to the text system's nil undoManager; claim it here.
+        if event.modifierFlags.contains(.command),
+           event.charactersIgnoringModifiers?.lowercased() == "z" {
+            if event.modifierFlags.contains(.shift) { redo(nil) } else { undo(nil) }
+            return
+        }
         super.keyDown(with: event)
     }
 
@@ -234,7 +241,6 @@ final class CellTextView: NSTextView, NSMenuDelegate {
         return accepted
     }
 
-    // IDE-style band behind the caret's line.
     override func drawBackground(in rect: NSRect) {
         super.drawBackground(in: rect)
         guard highlightsCurrentLine,
@@ -380,29 +386,11 @@ struct NSTextViewRepresentable: NSViewRepresentable {
     var undoManager: UndoManager? = nil
     var flushPendingEdits: () -> Void = {}
     var onTextChange: (NSAttributedString) -> Void
-    var onSelectionChange: (NSRange) -> Void
     var onFocus: () -> Void
-    /// Grid keys (Tab/Return/Escape) reported here; true = consumed. The
-    /// HTML pane leaves the default so its Tab/Return insert characters.
-    var onGridKey: (NSEvent) -> Bool = { _ in false }
-    /// Keyboard focus follows this flag only on false→true transitions that
-    /// start inside the grid, so clicks and doc switches never yank focus.
-    var isFocused: Bool = false
     /// Source-pane decorations (HTML pane only): syntax colors, gutter, caret band.
     var highlightsSyntax = false
     var showsLineNumbers = false
     var highlightsCurrentLine = false
-    /// Row/column commands for the context menu; nil outside the grid.
-    var cellCommands: ((CellCommand) -> Void)? = nil
-    /// Greys out a context-menu command the cell can't run; nil = all enabled.
-    var cellCommandValidator: ((CellCommand) -> Bool)? = nil
-    /// With a cell range selected, ⌘C copies the cells; true = handled.
-    var copyCells: (() -> Bool)?
-    /// ⌘V with a table on the pasteboard makes a new table; true = handled.
-    var pasteTable: (() -> Bool)?
-    /// Colspan context-menu support, grid only: read and set the cell's current span.
-    var colspanCurrent: (() -> Int)?
-    var colspanSet: ((Int) -> Void)?
 
     /// labelColor is appearance-dynamic; text lacking .foregroundColor
     /// renders BLACK regardless of textColor — invisible in dark mode.
@@ -482,7 +470,6 @@ struct NSTextViewRepresentable: NSViewRepresentable {
         }
 
         wire(textView: textView, coordinator: context.coordinator)
-        context.coordinator.lastFocused = isFocused
         context.coordinator.refreshDecorations(textView)
         return scrollView
     }
@@ -495,20 +482,6 @@ struct NSTextViewRepresentable: NSViewRepresentable {
         // applies directly; apply() skips the write when the text is equal.
         context.coordinator.apply(content: content, to: textView)
         context.coordinator.applyAlignmentIfNeeded(to: textView)
-
-        // Focus bridge: follow false→true grid moves only when the keyboard is already
-        // in the grid; initial creation (nil→true) must not steal focus (click-to-edit).
-        if context.coordinator.lastFocused != isFocused {
-            let previous = context.coordinator.lastFocused
-            context.coordinator.lastFocused = isFocused
-            if isFocused, previous == false, textView.window?.firstResponder is CellTextView {
-                DispatchQueue.main.async {
-                    guard textView.window?.firstResponder is CellTextView,
-                          textView.window?.firstResponder !== textView else { return }
-                    textView.window?.makeFirstResponder(textView)
-                }
-            }
-        }
 
         if !textView.backgroundColor.isEqual(Self.background(isHeader: isHeader)) {
             textView.backgroundColor = Self.background(isHeader: isHeader)
@@ -525,31 +498,10 @@ struct NSTextViewRepresentable: NSViewRepresentable {
         textView.flushPendingEditsHandler = { [weak coordinator] in
             coordinator?.parent.flushPendingEdits()
         }
-        textView.keyCommandHandler = { [weak coordinator] event in
-            coordinator?.parent.onGridKey(event) ?? false
-        }
-        // Must go nil outside the grid, or the HTML pane would offer dead row commands.
-        if cellCommands == nil {
-            textView.cellCommandHandler = nil
-            textView.cellCommandValidator = nil
-        } else {
-            textView.cellCommandHandler = { [weak coordinator] command in
-                guard let commands = coordinator?.parent.cellCommands else { return }
-                commands(command)
-            }
-            textView.cellCommandValidator = { [weak coordinator] command in
-                coordinator?.parent.cellCommandValidator?(command) ?? true
-            }
-        }
-        textView.copyCellsHandler = copyCells
-        textView.pasteTableHandler = pasteTable
-        textView.colspanCurrent = colspanCurrent
-        textView.colspanSet = colspanSet
     }
 
     final class Coordinator: NSObject, NSTextViewDelegate {
         var parent: NSTextViewRepresentable
-        var lastFocused: Bool?
         var lastAppliedAlignment: NSTextAlignment?
         // Table switches feed the identical string back through the regex pass; caching by
         // text keeps revisits free. Two LRU slots because a single-slot cache misses A/B/A.
@@ -651,7 +603,6 @@ struct NSTextViewRepresentable: NSViewRepresentable {
         func textViewDidChangeSelection(_ notification: Notification) {
             guard !applyingProgrammaticContent else { return }
             guard let textView = notification.object as? NSTextView else { return }
-            parent.onSelectionChange(textView.selectedRange())
             if parent.highlightsCurrentLine { textView.needsDisplay = true }
         }
 
@@ -665,11 +616,6 @@ struct NSTextViewRepresentable: NSViewRepresentable {
             applyingProgrammaticContent = true
             textView.selectedRanges = [NSValue(range: NSRange(location: loc, length: 0))]
             applyingProgrammaticContent = false
-            // The guard swallows the echo that used to sync the model, so
-            // report the collapse explicitly, off the update pass.
-            DispatchQueue.main.async { [parent] in
-                parent.onSelectionChange(NSRange(location: loc, length: 0))
-            }
         }
 
         // Derived decoration only: layout-manager temporary attributes never reach

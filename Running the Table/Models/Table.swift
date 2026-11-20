@@ -164,7 +164,7 @@ struct Table {
 
     /// Per-row occupancy: true where a cell originating at or above this row
     /// (via rowspan) already covers the visual column.
-    func occupancy() -> [[Bool]] {
+    private func occupancy() -> [[Bool]] {
         let cols = max(columnCount, 1)
         var taken = Array(repeating: Array(repeating: false, count: cols), count: rows.count)
         for row in rows.indices {

@@ -1,8 +1,7 @@
 import AppKit
 import SwiftUI
 
-/// Settings… as a real floating window: a standard titled NSWindow hosting the
-/// SwiftUI settings view, so it can sit beside the main window.
+/// A real floating window so Settings can sit beside the main window.
 @MainActor
 final class SettingsWindowController: NSWindowController {
     static let shared = SettingsWindowController()

@@ -1,7 +1,6 @@
 import SwiftUI
 
-/// Markdown export prompt: lists the specific markup Markdown cannot keep, or refuses
-/// outright when the table has no header row (a sheet, not an alert, so long lists scroll).
+/// A sheet, not an alert, so long loss lists scroll.
 struct MarkdownExportPrompt: View {
     var viewModel: TableViewModel
 

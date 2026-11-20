@@ -1,6 +1,5 @@
 import SwiftUI
 
-/// Name prompt for "Save as Template…", mirroring the link sheet's shape.
 struct TemplateNamePrompt: View {
     @Bindable var viewModel: TableViewModel
 
@@ -26,7 +25,6 @@ struct TemplateNamePrompt: View {
     }
 }
 
-/// Edit ▸ Manage Templates…: rename in place, delete with the trash button.
 struct TemplateManagerView: View {
     var viewModel: TableViewModel
     // Edits stage here and commit on submit, so a half-typed name never touches the template files.

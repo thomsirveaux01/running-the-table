@@ -48,9 +48,7 @@ enum GridKeyAction {
     case moved
     /// Enter edit mode; a non-nil string replaces the cell's content (typing).
     case beginEditing(insert: String?)
-    /// A single selected cell's content was cleared.
     case clearCell
-    /// A drag-selected range was cleared.
     case clearRange
     /// Editing ended (Escape); the cell keeps its content and stays focused.
     case endEditing
@@ -117,7 +115,6 @@ final class TableViewModel {
     // The save panel waits for the loss sheet's onDismiss: attaching beginSheetModal
     // mid-dismissal gets the panel killed before the user can touch it.
     private var pendingMarkdownSave = false
-    /// The filename the rename sheet displays, derived live from the title.
     var renameFileNameDisplay: String {
         Self.sanitizedFileName(renameTitleText.trimmingCharacters(in: .whitespacesAndNewlines))
     }
@@ -485,7 +482,6 @@ final class TableViewModel {
             cellMode = .selected
             return .moved
         case Self.f2KeyCode:
-            // F2 begins editing the selected cell with the caret at the end.
             guard cellMode == .selected else { return nil }
             cellMode = .editing
             return .beginEditing(insert: nil)
@@ -511,7 +507,6 @@ final class TableViewModel {
             // backspace, so hand it to the text system.
             return clearSelectedCells() ? .clearRange : nil
         default:
-            // Typing on a selected cell replaces its content and begins editing.
             guard cellMode == .selected, let typed = typedString(from: event) else { return nil }
             cellMode = .editing
             return .beginEditing(insert: typed)
@@ -570,7 +565,6 @@ final class TableViewModel {
                     col = 0
                 }
             } else {
-                // Shift-Tab walks left; at the left edge it steps up a row.
                 if col > 0 {
                     col -= 1
                 } else {
@@ -579,14 +573,11 @@ final class TableViewModel {
                 }
             }
         } else if enter != 0 {
-            // Enter returns to the Tab series' origin column when one is active,
-            // otherwise it stays in the current column.
             let targetCol = (enter > 0 && tabOriginCol != nil) ? tabOriginCol! : col
             row += (enter > 0) ? 1 : -1
             col = targetCol
             tabOriginCol = nil  // the series ends once Enter is used
         } else {
-            // Arrows: a plain step.
             row += dy
             col += dx
         }
@@ -2032,13 +2023,8 @@ final class TableViewModel {
     }
 
     private static func uniqueFileURL(for name: String, taken: inout Set<String>) -> URL {
-        let base = sanitizedFileName(name)
-        var candidate = saveDirectory.appendingPathComponent("\(base).html")
-        var suffix = 2
-        while taken.contains(candidate.path) {
-            candidate = saveDirectory.appendingPathComponent("\(base) \(suffix).html")
-            suffix += 1
-        }
+        let candidate = saveDirectory.appendingPathComponent(
+            uniquifiedName(sanitizedFileName(name) + ".html", in: saveDirectory) { taken.contains($0.path) })
         taken.insert(candidate.path)
         return candidate
     }
@@ -2104,12 +2090,8 @@ final class TableViewModel {
             let name = store[canonicalPath(url)] ?? (legacy?.isEmpty == false ? legacy! : stem)
             let newStem = sanitizedFileName(name)
             guard newStem != stem else { continue }
-            var candidate = saveDirectory.appendingPathComponent("\(newStem).html")
-            var suffix = 2
-            while taken.contains(candidate.path) {
-                candidate = saveDirectory.appendingPathComponent("\(newStem) \(suffix).html")
-                suffix += 1
-            }
+            let candidate = saveDirectory.appendingPathComponent(
+                uniquifiedName(newStem + ".html", in: saveDirectory) { taken.contains($0.path) })
             guard (try? FileManager.default.moveItem(at: url, to: candidate)) != nil else { continue }
             taken.remove(url.path)
             taken.insert(candidate.path)
@@ -2287,11 +2269,9 @@ final class TableViewModel {
         let pRows = pasted.rows.count
         let pCols = pasted.columnCount
 
-        // Grow rows so the whole block fits below the anchor.
         while table.rows.count < vr + pRows {
             table.rows.append(TableRow(cells: Array(repeating: TableCell(), count: max(table.columnCount, 1))))
         }
-        // Grow columns so the block fits to the right of the anchor.
         while table.columnCount < vc + pCols {
             for row in table.rows.indices {
                 table.rows[row].cells.append(TableCell(isHeader: table.rows[row].allHeaders))
@@ -2299,7 +2279,6 @@ final class TableViewModel {
         }
         table.normalize()
 
-        // Overwrite each pasted cell at its target visual position.
         for (i, rowSlots) in pasted.placements().enumerated() {
             for p in rowSlots {
                 let hr = vr + i
@@ -2358,7 +2337,7 @@ final class TableViewModel {
         let beforeDocuments = deepCopied(documents)
         let beforeSelection = selectedDocumentID
 
-        let table = Table.loaded(from: parsed, name: uniquePastedName())
+        let table = Table.loaded(from: parsed, name: uniqueName("Pasted Table", avoiding: Set(documents.map(\.name))))
         var doc = TableDocument(table: table, fileURL: nil)
         doc.lastEdited = Date()
         withAnimation { documents.insert(doc, at: 0) }
@@ -2368,14 +2347,6 @@ final class TableViewModel {
         registerDocumentUndo(name: "Paste as New Table",
                              undoTo: beforeDocuments, undoSelection: beforeSelection,
                              redoTo: deepCopied(documents), redoSelection: selectedDocumentID)
-    }
-
-    private func uniquePastedName() -> String {
-        let taken = Set(documents.map(\.name))
-        var candidate = "Pasted Table"
-        var suffix = 2
-        while taken.contains(candidate) { candidate = "Pasted Table \(suffix)"; suffix += 1 }
-        return candidate
     }
 
     // MARK: - CSV import/export

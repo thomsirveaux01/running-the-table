@@ -1133,10 +1133,6 @@ final class GridDocumentView: NSView {
     }
 
     private var viewModel: TableViewModel? { coordinator?.viewModel }
-
-    override func resetCursorRects() {
-        // The handle views own their cursor rects; nothing to add here.
-    }
 }
 
 @MainActor

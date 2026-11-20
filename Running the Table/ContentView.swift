@@ -373,8 +373,7 @@ struct SidebarRow: View {
     }
 }
 
-/// Update-available sheet: one-line announcement, bulleted release notes capped at a
-/// scrollable height so a long list cannot break the window, then the actions.
+/// Notes are capped at a scrollable height so a long list cannot break the window.
 struct UpdatePromptView: View {
     let version: String
     let notes: String

@@ -52,7 +52,6 @@ struct TableCell {
     }
 }
 
-/// Toolbar labels for the cell alignment options.
 extension NSTextAlignment {
     var iconName: String {
         switch self {

@@ -1,8 +1,7 @@
 import AppKit
 import SwiftUI
 
-/// The WYSIWYG grid entry point: wraps TableGridView (one AppKit document view drawing
-/// every cell with a shared editor) and lists the view-model properties whose changes re-sync it.
+/// Wraps TableGridView, one AppKit document view drawing every cell with a shared editor.
 struct WYSIWYGView: View {
     var viewModel: TableViewModel
 
