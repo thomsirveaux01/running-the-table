@@ -1,10 +1,19 @@
-# Running the Table
+<p align="center">
+    <img src="icon.png" width="160" alt="Running the Table app icon">
+</p>
 
-Lightweight macOS table editor for clean HTML tables. WYSIWYG grid on top, live HTML source pane below, Notes-style sidebar of saved tables.
+<h1 align="center">Running the Table</h1>
+
+<p align="center">
+    Lightweight macOS table editor for clean HTML tables. WYSIWYG grid on top, live HTML source pane below, Notes-style sidebar of saved tables.
+</p>
+<p align="center">
+    macOS 15.6+. Supports Apple Silicon and Intel. Signed and notarized.
+</p>
 
 ## Download
 
-[Latest release](https://github.com/thomsirveaux01/running-the-table/releases/latest). macOS 15.6+. Supports Apple Silicon and Intel. Signed and notarized.
+[Latest release](https://github.com/thomsirveaux01/running-the-table/releases/latest).
 
 ## Features
 
